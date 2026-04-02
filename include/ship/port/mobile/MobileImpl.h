@@ -10,5 +10,9 @@ namespace Ship {
 class Mobile {
   public:
     static void ImGuiProcessEvent(bool wantsTextInput);
+    static void SetToggleButtonVisible(bool visible);
+#ifdef __ANDROID__
+    static bool ConsumeGamepadBackPress();
+#endif
 };
 }; // namespace Ship

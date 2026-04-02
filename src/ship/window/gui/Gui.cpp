@@ -19,6 +19,9 @@
 namespace Ship {
 #define TOGGLE_BTN ImGuiKey_F1
 #define TOGGLE_PAD_BTN ImGuiKey_GamepadBack
+#if defined(__ANDROID__)
+#define TOGGLE_BACK_BTN ImGuiKey_AppBack
+#endif
 
 Gui::Gui(std::vector<std::shared_ptr<GuiWindow>> guiWindows) : mNeedsConsoleVariableSave(false) {
     mGameOverlay = std::make_shared<GameOverlay>();
@@ -74,6 +77,12 @@ void Gui::Init() {
     // Scale everything by 2 for Android
     ImGui::GetStyle().ScaleAllSizes(2.0f);
     mImGuiIo->FontGlobalScale = 2.0f;
+    // Prevent focus-loss events (from file picker / AlertDialog) from calling ClearInputKeys(),
+    // which wipes gamepad state and breaks SELECT/BACK → menu toggle.
+    mImGuiIo->ConfigDebugIgnoreFocusLoss = true;
+    // Trap the Android Back key so it goes to SDL (fires ImGuiKey_AppBack) rather than
+    // triggering super.onBackPressed() which sends the app to the background.
+    SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
 #endif
 
     mImGuiIniPath = Context::GetPathRelativeToAppDirectory("imgui.ini");
@@ -203,6 +212,28 @@ void Gui::DrawMenu() {
 
     ImGui::DockSpace(dockId, ImVec2(0.0f, 0.0f), ImGuiDockNodeFlags_None | ImGuiDockNodeFlags_NoDockingInCentralNode);
 
+#if defined(__ANDROID__)
+    bool anyMenuKeyPressed = (
+        ImGui::IsKeyPressed(ImGuiKey_Escape, false) ||
+        ImGui::IsKeyPressed(TOGGLE_BTN, false) ||
+        Ship::Mobile::ConsumeGamepadBackPress()
+    );
+
+    if (anyMenuKeyPressed) {
+        if (GetMenu()) {
+            GetMenu()->ToggleVisibility();
+        } else if (GetMenuBar()) {
+            GetMenuBar()->ToggleVisibility();
+        }
+        Ship::Context::GetInstance()->GetWindow()->GetMouseStateManager()->UpdateMouseCapture();
+        if (Ship::Context::GetInstance()->GetConsoleVariables()->GetInteger(CVAR_IMGUI_CONTROLLER_NAV, 0) &&
+            GetMenuOrMenubarVisible()) {
+            mImGuiIo->ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+        } else {
+            mImGuiIo->ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;
+        }
+    }
+#else
     if (ImGui::IsKeyPressed(TOGGLE_BTN, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false) ||
         (ImGui::IsKeyPressed(TOGGLE_PAD_BTN, false) &&
          Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger(CVAR_IMGUI_CONTROLLER_NAV, 0))) {
@@ -220,6 +251,7 @@ void Gui::DrawMenu() {
             mImGuiIo->ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;
         }
     }
+#endif
 
     // Mac interprets this as cmd+r when io.ConfigMacOSXBehavior is on (on by default)
     if ((ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl)) &&
