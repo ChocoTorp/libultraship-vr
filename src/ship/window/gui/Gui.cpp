@@ -142,12 +142,18 @@ bool Gui::GamepadNavigationEnabled() {
 
 void Gui::BlockGamepadNavigation() {
     mImGuiIo->ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;
+#if defined(__ANDROID__)
+    mImGuiIo->ConfigFlags &= ~ImGuiConfigFlags_NavEnableKeyboard;
+#endif
 }
 
 void Gui::UnblockGamepadNavigation() {
     if (Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger(CVAR_IMGUI_CONTROLLER_NAV, 0) &&
         GetMenuOrMenubarVisible()) {
         mImGuiIo->ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+#if defined(__ANDROID__)
+        mImGuiIo->ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+#endif
     }
 }
 
@@ -229,8 +235,10 @@ void Gui::DrawMenu() {
         if (Ship::Context::GetInstance()->GetConsoleVariables()->GetInteger(CVAR_IMGUI_CONTROLLER_NAV, 0) &&
             GetMenuOrMenubarVisible()) {
             mImGuiIo->ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+            mImGuiIo->ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
         } else {
             mImGuiIo->ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;
+            mImGuiIo->ConfigFlags &= ~ImGuiConfigFlags_NavEnableKeyboard;
         }
     }
 #else
@@ -295,6 +303,26 @@ void Gui::HandleMouseCapture() {
 
 void Gui::StartFrame() {
     HandleMouseCapture();
+#if defined(__ANDROID__)
+    // On first launch the window already has focus before ImGui initialises, so
+    // FOCUS_GAINED never fires and bd->Gamepads stays empty.  Also, the fake
+    // SDL_CONTROLLERDEVICEADDED approach does not work because
+    // SDLAddRemoveDeviceEventHandler::UpdateElement() drains that event type from
+    // the queue via SDL_PeepEvents(SDL_GETEVENT) before ImGui_ImplSDL2_ProcessEvent
+    // ever sees it.  Call SetGamepadMode directly instead — it sets
+    // WantUpdateGamepadsList = true inside ImGui without touching the event queue.
+    {
+        static Uint32 sRescanAt = 0;
+        if (!(mImGuiIo->BackendFlags & ImGuiBackendFlags_HasGamepad)) {
+            if (!sRescanAt || SDL_TICKS_PASSED(SDL_GetTicks(), sRescanAt)) {
+                sRescanAt = SDL_GetTicks() + 2000;
+                ImGui_ImplSDL2_SetGamepadMode(ImGui_ImplSDL2_GamepadMode_AutoFirst);
+            }
+        } else {
+            sRescanAt = 0;
+        }
+    }
+#endif
     ImGuiBackendNewFrame();
     ImGuiWMNewFrame();
     ImGui::NewFrame();
