@@ -13,6 +13,7 @@ class Mobile {
     static void SetToggleButtonVisible(bool visible);
 #ifdef __ANDROID__
     static bool ConsumeGamepadBackPress();
+    static void InjectMenuNavKeys();
 #endif
 };
 }; // namespace Ship

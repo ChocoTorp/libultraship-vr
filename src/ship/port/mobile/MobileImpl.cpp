@@ -75,6 +75,35 @@ extern "C" void JNICALL Java_com_dishii_soh_MainActivity_setAxis(JNIEnv* env, jo
     SDL_JoystickSetVirtualAxis(virtual_joystick, axis, value);
 }
 
+// D-pad bits set from UI thread, consumed by InjectMenuNavKeys() on the game thread.
+static std::atomic<uint8_t> sDpadPressedBits{0};
+static std::atomic<uint8_t> sDpadReleasedBits{0};
+
+extern "C" void JNICALL Java_com_dishii_soh_MainActivity_nativeMenuNavKey(JNIEnv* env, jobject obj, jint dir, jboolean pressed) {
+    if (dir >= 0 && dir < 6) {
+        if (pressed) {
+            sDpadPressedBits.fetch_or(1 << dir, std::memory_order_relaxed);
+        } else {
+            sDpadReleasedBits.fetch_or(1 << dir, std::memory_order_relaxed);
+        }
+    }
+}
+
+void Ship::Mobile::InjectMenuNavKeys() {
+    static const ImGuiKey kDirKeys[] = {
+        ImGuiKey_GamepadDpadUp, ImGuiKey_GamepadDpadDown,
+        ImGuiKey_GamepadDpadLeft, ImGuiKey_GamepadDpadRight,
+        ImGuiKey_GamepadFaceDown,  // A / select
+        ImGuiKey_GamepadFaceRight, // B / back
+    };
+    uint8_t pressed  = sDpadPressedBits.exchange(0, std::memory_order_relaxed);
+    uint8_t released = sDpadReleasedBits.exchange(0, std::memory_order_relaxed);
+    for (int i = 0; i < 6; i++) {
+        if (pressed  & (1 << i)) ImGui::GetIO().AddKeyEvent(kDirKeys[i], true);
+        if (released & (1 << i)) ImGui::GetIO().AddKeyEvent(kDirKeys[i], false);
+    }
+}
+
 extern "C" void JNICALL Java_com_dishii_soh_MainActivity_setCameraState(JNIEnv* env, jobject obj, jint axis, jfloat value) {
 }
 

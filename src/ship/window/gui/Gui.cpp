@@ -213,6 +213,8 @@ void Gui::DrawMenu() {
     ImGui::DockSpace(dockId, ImVec2(0.0f, 0.0f), ImGuiDockNodeFlags_None | ImGuiDockNodeFlags_NoDockingInCentralNode);
 
 #if defined(__ANDROID__)
+    Ship::Mobile::InjectMenuNavKeys();
+
     bool anyMenuKeyPressed = (
         ImGui::IsKeyPressed(ImGuiKey_Escape, false) ||
         ImGui::IsKeyPressed(TOGGLE_BTN, false) ||
@@ -226,8 +228,7 @@ void Gui::DrawMenu() {
             GetMenuBar()->ToggleVisibility();
         }
         Ship::Context::GetInstance()->GetWindow()->GetMouseStateManager()->UpdateMouseCapture();
-        if (Ship::Context::GetInstance()->GetConsoleVariables()->GetInteger(CVAR_IMGUI_CONTROLLER_NAV, 0) &&
-            GetMenuOrMenubarVisible()) {
+        if (GetMenuOrMenubarVisible()) {
             mImGuiIo->ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
         } else {
             mImGuiIo->ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;
@@ -296,13 +297,8 @@ void Gui::HandleMouseCapture() {
 void Gui::StartFrame() {
     HandleMouseCapture();
 #if defined(__ANDROID__)
-    // On first launch the window already has focus before ImGui initialises, so
-    // FOCUS_GAINED never fires and bd->Gamepads stays empty.  Also, the fake
-    // SDL_CONTROLLERDEVICEADDED approach does not work because
-    // SDLAddRemoveDeviceEventHandler::UpdateElement() drains that event type from
-    // the queue via SDL_PeepEvents(SDL_GETEVENT) before ImGui_ImplSDL2_ProcessEvent
-    // ever sees it.  Call SetGamepadMode directly instead — it sets
-    // WantUpdateGamepadsList = true inside ImGui without touching the event queue.
+    // On first launch FOCUS_GAINED never fires so gamepads list stays empty.
+    // SetGamepadMode sets WantUpdateGamepadsList without touching the event queue.
     {
         static Uint32 sRescanAt = 0;
         if (!(mImGuiIo->BackendFlags & ImGuiBackendFlags_HasGamepad)) {
@@ -317,6 +313,11 @@ void Gui::StartFrame() {
 #endif
     ImGuiBackendNewFrame();
     ImGuiWMNewFrame();
+#if defined(__ANDROID__)
+    // ImGui_ImplSDL2_NewFrame clears HasGamepad (virtual joystick has no controller db entry).
+    // Restore it so NavUpdate accepts InjectMenuNavKeys() events.
+    mImGuiIo->BackendFlags |= ImGuiBackendFlags_HasGamepad;
+#endif
     ImGui::NewFrame();
 }
 
