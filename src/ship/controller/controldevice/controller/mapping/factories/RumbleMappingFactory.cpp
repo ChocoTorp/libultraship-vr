@@ -44,13 +44,14 @@ RumbleMappingFactory::CreateDefaultSDLRumbleMappings(PhysicalDeviceType physical
 std::shared_ptr<ControllerRumbleMapping> RumbleMappingFactory::CreateRumbleMappingFromSDLInput(uint8_t portIndex) {
     std::shared_ptr<ControllerRumbleMapping> mapping = nullptr;
 
-    for (auto [instanceId, gamepad] : Context::GetRawInstance()
-                                          ->GetControlDeck()
-                                          ->GetConnectedPhysicalDeviceManager()
-                                          ->GetConnectedSDLGamepadsForPort(portIndex)) {
+    for (auto [instanceId, gamepad] :
+         Context::GetRawInstance()->GetControlDeck()->GetConnectedPhysicalDeviceManager()->GetConnectedSDLGamepadsForPort(
+             portIndex)) {
+#ifndef __ANDROID__
         if (!SDL_GameControllerHasRumble(gamepad)) {
             continue;
         }
+#endif
 
         for (int32_t button = SDL_CONTROLLER_BUTTON_A; button < SDL_CONTROLLER_BUTTON_MAX; button++) {
             if (SDL_GameControllerGetButton(gamepad, static_cast<SDL_GameControllerButton>(button))) {
