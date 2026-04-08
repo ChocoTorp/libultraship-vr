@@ -49,6 +49,20 @@ extern "C" void JNICALL Java_com_dishii_soh_MainActivity_attachController(JNIEnv
         SDL_Log("Could not create overlay virtual controller");
         return;
     }
+    // Register mapping before SDL_PumpEvents so SDL_IsGameController returns true as "Touch Overlay".
+    SDL_JoystickGUID guid = SDL_JoystickGetDeviceGUID(virtual_joystick_id);
+    char guidStr[33];
+    SDL_JoystickGetGUIDString(guid, guidStr, sizeof(guidStr));
+    char mappingStr[512];
+    SDL_snprintf(mappingStr, sizeof(mappingStr),
+        "%s,Touch Overlay,"
+        "a:b0,b:b1,x:b2,y:b3,back:b4,guide:b5,start:b6,"
+        "leftstick:b7,rightstick:b8,leftshoulder:b9,rightshoulder:b10,"
+        "dpup:b11,dpdown:b12,dpleft:b13,dpright:b14,"
+        "leftx:a0,lefty:a1,rightx:a2,righty:a3,lefttrigger:a4,righttrigger:a5,"
+        "platform:Android,",
+        guidStr);
+    SDL_GameControllerAddMapping(mappingStr);
     virtual_joystick = SDL_JoystickOpen(virtual_joystick_id);
     if (virtual_joystick == nullptr)
         SDL_Log("Could not create virtual joystick");
