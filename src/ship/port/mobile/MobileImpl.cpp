@@ -118,7 +118,46 @@ void Ship::Mobile::InjectMenuNavKeys() {
     }
 }
 
+static std::atomic<float> sTouchCamX{0.0f};
+static std::atomic<float> sTouchCamY{0.0f};
+static std::atomic<bool> sFreeLookTouchEnabled{false};
+
 extern "C" void JNICALL Java_com_dishii_soh_MainActivity_setCameraState(JNIEnv* env, jobject obj, jint axis, jfloat value) {
+    if (axis == 0) {
+        sTouchCamX.store(value);
+    } else if (axis == 1) {
+        sTouchCamY.store(value);
+    }
+}
+
+void Ship::Mobile::HandleTouchCamera(float* camX, float* camY) {
+    if (!sFreeLookTouchEnabled.load()) {
+        return;
+    }
+    *camX += sTouchCamX.exchange(0.0f);
+    *camY += sTouchCamY.exchange(0.0f);
+}
+
+extern "C" void Ship_Mobile_HandleTouchCamera(float* camX, float* camY) {
+    Ship::Mobile::HandleTouchCamera(camX, camY);
+}
+
+extern "C" void JNICALL Java_com_dishii_soh_MainActivity_nativeSetFreeLookTouchEnabled(JNIEnv* env, jobject obj, jboolean enabled) {
+    sFreeLookTouchEnabled.store((bool)enabled);
+}
+
+void Ship::Mobile::SetFreeLookTouchEnabled(bool enabled) {
+    sFreeLookTouchEnabled.store(enabled);
+    JNIEnv* env = (JNIEnv*)SDL_AndroidGetJNIEnv();
+    jobject javaObject = (jobject)SDL_AndroidGetActivity();
+    if (env == nullptr || javaObject == nullptr) {
+        return;
+    }
+    jclass javaClass = env->GetObjectClass(javaObject);
+    jmethodID method = env->GetMethodID(javaClass, "setFreeLookTouchEnabledFromNative", "(Z)V");
+    if (method != nullptr) {
+        env->CallVoidMethod(javaObject, method, (jboolean)enabled);
+    }
 }
 
 void Ship::Mobile::SetToggleButtonVisible(bool visible) {
