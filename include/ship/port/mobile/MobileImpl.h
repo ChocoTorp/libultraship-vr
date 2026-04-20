@@ -14,6 +14,7 @@ class Mobile {
 #ifdef __ANDROID__
     static bool ConsumeGamepadBackPress();
     static void InjectMenuNavKeys();
+    static bool HasTouchCameraInput();
     static void HandleTouchCamera(float* camX, float* camY);
     static void SetFreeLookTouchEnabled(bool enabled);
 #endif
