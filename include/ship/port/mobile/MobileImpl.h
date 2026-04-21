@@ -17,6 +17,9 @@ class Mobile {
     static bool HasTouchCameraInput();
     static void HandleTouchCamera(float* camX, float* camY);
     static void SetFreeLookTouchEnabled(bool enabled);
+    static void SetFirstPersonAimingActive(bool active);
+    static bool IsTouchItemButtonPulse();
+    static bool IsTouchItemButtonHeld();
 #endif
 };
 }; // namespace Ship

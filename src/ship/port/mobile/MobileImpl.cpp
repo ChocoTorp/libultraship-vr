@@ -121,6 +121,8 @@ void Ship::Mobile::InjectMenuNavKeys() {
 static std::atomic<float> sTouchCamX{0.0f};
 static std::atomic<float> sTouchCamY{0.0f};
 static std::atomic<bool> sFreeLookTouchEnabled{false};
+static std::atomic<bool> sTouchItemButtonPulse{false};
+static std::atomic<bool> sTouchItemButtonHeld{false};
 
 extern "C" void JNICALL Java_com_dishii_soh_MainActivity_setCameraState(JNIEnv* env, jobject obj, jint axis, jfloat value) {
     if (axis == 0) {
@@ -158,6 +160,37 @@ void Ship::Mobile::SetFreeLookTouchEnabled(bool enabled) {
     sFreeLookTouchEnabled.store(enabled);
 }
 
+bool Ship::Mobile::IsTouchItemButtonPulse() {
+    if (!sFreeLookTouchEnabled.load()) {
+        sTouchItemButtonPulse.store(false);
+        return false;
+    }
+    return sTouchItemButtonPulse.exchange(false);
+}
+
+bool Ship::Mobile::IsTouchItemButtonHeld() {
+    if (!sFreeLookTouchEnabled.load()) {
+        return false;
+    }
+    return sTouchItemButtonHeld.load();
+}
+
+extern "C" bool Ship_Mobile_IsTouchItemButtonPulse(void) {
+    return Ship::Mobile::IsTouchItemButtonPulse();
+}
+
+extern "C" bool Ship_Mobile_IsItemButtonHeld(void) {
+    return Ship::Mobile::IsTouchItemButtonHeld();
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_dishii_soh_MainActivity_setItemButtonPulse(JNIEnv*, jobject) {
+    sTouchItemButtonPulse.store(true);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_dishii_soh_MainActivity_setItemButtonHeld(JNIEnv*, jobject, jboolean held) {
+    sTouchItemButtonHeld.store((bool)held);
+}
+
 void Ship::Mobile::SetToggleButtonVisible(bool visible) {
     JNIEnv* env = (JNIEnv*)SDL_AndroidGetJNIEnv();
     jobject javaObject = (jobject)SDL_AndroidGetActivity();
@@ -165,4 +198,13 @@ void Ship::Mobile::SetToggleButtonVisible(bool visible) {
     jmethodID method = env->GetMethodID(javaClass, "SetToggleButtonVisible", "(Z)V");
     env->CallVoidMethod(javaObject, method, (jboolean)visible);
 }
+
+void Ship::Mobile::SetFirstPersonAimingActive(bool active) {
+    JNIEnv* env = (JNIEnv*)SDL_AndroidGetJNIEnv();
+    jobject javaObject = (jobject)SDL_AndroidGetActivity();
+    jclass javaClass = env->GetObjectClass(javaObject);
+    jmethodID method = env->GetMethodID(javaClass, "SetFirstPersonAimingActive", "(Z)V");
+    env->CallVoidMethod(javaObject, method, (jboolean)active);
+}
+
 #endif
