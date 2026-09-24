@@ -71,3 +71,14 @@ if (NOT ${libzip_FOUND})
 endif()
 
 target_link_libraries(ImGui PUBLIC SDL2::SDL2)
+
+#=================== glm (QuestShip: header-only math for the VR layer) ===================
+# SOURCE_SUBDIR points nowhere so MakeAvailable only downloads (no glm targets/tests are built).
+FetchContent_Declare(
+    glm
+    GIT_REPOSITORY https://github.com/g-truc/glm.git
+    GIT_TAG 1.0.1
+    SOURCE_SUBDIR questship-headers-only
+)
+FetchContent_MakeAvailable(glm)
+list(APPEND ADDITIONAL_LIB_INCLUDES ${glm_SOURCE_DIR})

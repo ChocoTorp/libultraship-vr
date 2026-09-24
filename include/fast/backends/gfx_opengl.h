@@ -105,6 +105,12 @@ class GfxRenderingAPIOGL final : public GfxRenderingAPI {
     void SetSrgbMode() override;
     ImTextureID GetTextureById(int id) override;
 
+    // SOH [VR] (QuestShip) The VR layer renders into OpenXR swapchain images through FBOs it owns.
+    // Binding one here registers it as a framebuffer slot, so viewport/scissor math, clip Y-inversion
+    // and noise all see the XR image's real size (GL convention, not inverted).
+    void BindExternalFramebuffer(GLuint fbo, uint32_t width, uint32_t height);
+    void ClearCurrentFramebuffer(float r, float g, float b, float a, bool depth);
+
   private:
     void SetUniforms(ShaderProgram* prg) const;
     std::string BuildFsShader(const CCFeatures& cc_features);
@@ -131,6 +137,7 @@ class GfxRenderingAPIOGL final : public GfxRenderingAPI {
 
     std::vector<FramebufferOGL> mFrameBuffers;
     size_t mCurrentFrameBuffer = 0;
+    size_t mExternalFrameBuffer = 0; // slot used by BindExternalFramebuffer, 0 = not created yet
     float mCurrentNoiseScale = 0.0f;
     FilteringMode mCurrentFilterMode = FILTER_THREE_POINT;
 

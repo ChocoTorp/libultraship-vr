@@ -255,6 +255,10 @@ bool Fast3dWindow::DrawAndRunGraphicsCommands(Gfx* commands, const std::unordere
         // The companion window is a courtesy view. Presenting it every XR frame costs an ImGui
         // frame, a full-eye-resolution mirror blit and a desktop Present, all on the critical path.
         presentDesktop = (mVrFrameCounter % desktopDivisor) == 0u;
+#ifdef __ANDROID__
+        // QuestShip: standalone headset, no companion window to present to.
+        presentDesktop = false;
+#endif
 
         mVrFrameCounter++;
         vr_set_frame_plan(renderEyes, renderHud, presentDesktop);

@@ -2,7 +2,10 @@
 
 #include "fast/vr_openxr.h"
 
-#ifdef ENABLE_DX11
+// QuestShip: VR_GLES is the Quest (Android) path: OpenXR over GLES/EGL (XR_KHR_opengl_es_enable)
+// instead of D3D11. Only the graphics binding, swapchain targets and mirror differ; everything
+// else (poses, input, layers, frame loop) is shared.
+#if defined(ENABLE_DX11) || defined(VR_GLES)
 
 #include <vector>
 #include <string>
@@ -11,11 +14,20 @@
 #include <chrono>
 #include <unordered_map>
 
+#ifdef VR_GLES
+#include <jni.h>
+#include <EGL/egl.h>
+#include <GLES3/gl3.h>
+#include <SDL2/SDL_system.h>
+#define XR_USE_PLATFORM_ANDROID
+#define XR_USE_GRAPHICS_API_OPENGL_ES
+#else
 #include <d3d11.h>
 #include <wrl/client.h>
 using Microsoft::WRL::ComPtr;
 
 #define XR_USE_GRAPHICS_API_D3D11
+#endif
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
 
@@ -25,7 +37,11 @@ using Microsoft::WRL::ComPtr;
 #include "ship/Context.h"
 #include "fast/Fast3dWindow.h"
 #include "fast/interpreter.h"
+#ifdef VR_GLES
+#include "fast/backends/gfx_opengl.h"
+#else
 #include "fast/backends/gfx_direct3d_common.h"
+#endif
 #include "fast/vr_physics.h"
 
 #include <glm/glm.hpp>
@@ -52,6 +68,15 @@ Fast::Interpreter* vr_get_interpreter() {
     return interp ? interp.get() : nullptr;
 }
 
+#ifdef VR_GLES
+static Fast::GfxRenderingAPIOGL* vr_ogl() {
+    Fast::Interpreter* interp = vr_get_interpreter();
+    if (!interp) {
+        return nullptr;
+    }
+    return static_cast<Fast::GfxRenderingAPIOGL*>(interp->GetCurrentRenderingAPI());
+}
+#else
 static Fast::GfxRenderingAPIDX11* vr_dx11() {
     Fast::Interpreter* interp = vr_get_interpreter();
     if (!interp) {
@@ -75,6 +100,7 @@ static void gfx_d3d11_set_render_target_height(uint32_t height) {
         dx->SetRenderTargetHeight((int32_t)height);
     }
 }
+#endif
 
 // The interpreter sizes 2D/flat renders from mCurDimensions; point them at the given target so
 // rectangles and the viewport fill the actual texture (replaces the old gfx_current_dimensions
@@ -129,10 +155,16 @@ static struct {
         XrSwapchain handle;
         int64_t format;
         uint32_t width, height;
+#ifdef VR_GLES
+        std::vector<XrSwapchainImageOpenGLESKHR> images;
+        std::vector<GLuint> fbos;  // one FBO per swapchain image, color = the XR texture
+        GLuint depth_rb;           // shared depth/stencil renderbuffer (only one image is drawn at a time)
+#else
         std::vector<XrSwapchainImageD3D11KHR> images;
         std::vector<ComPtr<ID3D11RenderTargetView>> rtvs;
         std::vector<ComPtr<ID3D11DepthStencilView>> dsvs;
         std::vector<ComPtr<ID3D11Texture2D>> depth_textures;
+#endif
     } eye_swapchains[2];
 
     // Per-frame
@@ -241,12 +273,17 @@ static struct {
     // Desktop mirror: a copy of the left eye for display in the companion window. We can't sample the
     // swapchain image directly at present time (the runtime owns it once released), so the left eye is
     // copied here each frame while still acquired.
+#ifdef VR_GLES
+    // No desktop mirror on Quest (nothing to show it on).
+    Fast::GfxRenderingAPIOGL* ogl;
+#else
     ComPtr<ID3D11Texture2D> mirror_texture;
     ComPtr<ID3D11ShaderResourceView> mirror_srv;
 
     // D3D11 cached pointers
     ID3D11Device* d3d_device;
     ID3D11DeviceContext* d3d_context;
+#endif
 
     bool initialized;
     // Runtime VR<->flat toggle. `initialized` means the OpenXR session exists; `enabled` means the
@@ -273,6 +310,190 @@ static void vr_restore_eye_dimensions() {
     if (sc.width > 0 && sc.height > 0) {
         vr_apply_dimensions(sc.width, sc.height);
     }
+}
+
+// --------------------------------------------------------------------------
+// Swapchain render targets: the graphics-API-specific part of the layer
+// --------------------------------------------------------------------------
+
+using VrSwapchain = decltype(xr.hud_swapchain);
+
+static bool xr_check(XrResult result, const char* msg);
+
+#ifdef VR_GLES
+static constexpr int64_t kSwapchainFormatSrgb = GL_SRGB8_ALPHA8;
+static constexpr int64_t kSwapchainFormatUnorm = GL_RGBA8;
+#else
+static constexpr int64_t kSwapchainFormatSrgb = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+static constexpr int64_t kSwapchainFormatUnorm = DXGI_FORMAT_R8G8B8A8_UNORM;
+static DXGI_FORMAT g_view_format = DXGI_FORMAT_R8G8B8A8_UNORM; // set in vr_init
+#endif
+
+// Create the XR swapchain for sc (width/height/format already set) and a render target per image.
+static bool vr_create_swapchain(VrSwapchain& sc, const char* label) {
+    XrSwapchainCreateInfo swapchain_ci = { XR_TYPE_SWAPCHAIN_CREATE_INFO };
+    swapchain_ci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+    swapchain_ci.format = sc.format;
+    swapchain_ci.sampleCount = 1;
+    swapchain_ci.width = sc.width;
+    swapchain_ci.height = sc.height;
+    swapchain_ci.faceCount = 1;
+    swapchain_ci.arraySize = 1;
+    swapchain_ci.mipCount = 1;
+
+    if (!xr_check(xrCreateSwapchain(xr.session, &swapchain_ci, &sc.handle), "xrCreateSwapchain")) {
+        spdlog::error("[VR] ({} swapchain)", label);
+        return false;
+    }
+
+    uint32_t image_count = 0;
+    xrEnumerateSwapchainImages(sc.handle, 0, &image_count, nullptr);
+#ifdef VR_GLES
+    sc.images.resize(image_count, { XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_ES_KHR });
+#else
+    sc.images.resize(image_count, { XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR });
+#endif
+    xrEnumerateSwapchainImages(sc.handle, image_count, &image_count,
+                               reinterpret_cast<XrSwapchainImageBaseHeader*>(sc.images.data()));
+
+#ifdef VR_GLES
+    glGenRenderbuffers(1, &sc.depth_rb);
+    glBindRenderbuffer(GL_RENDERBUFFER, sc.depth_rb);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, sc.width, sc.height);
+    glBindRenderbuffer(GL_RENDERBUFFER, 0);
+
+    sc.fbos.resize(image_count);
+    glGenFramebuffers(image_count, sc.fbos.data());
+    bool ok = true;
+    for (uint32_t i = 0; i < image_count; i++) {
+        glBindFramebuffer(GL_FRAMEBUFFER, sc.fbos[i]);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, sc.images[i].image, 0);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, sc.depth_rb);
+        const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        if (status != GL_FRAMEBUFFER_COMPLETE) {
+            spdlog::error("[VR] {} swapchain image {} FBO incomplete: 0x{:x}", label, i, status);
+            ok = false;
+        }
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (!ok) {
+        return false;
+    }
+#else
+    sc.rtvs.resize(image_count);
+    sc.dsvs.resize(image_count);
+    sc.depth_textures.resize(image_count);
+
+    for (uint32_t i = 0; i < image_count; i++) {
+        // RTV
+        D3D11_RENDER_TARGET_VIEW_DESC rtv_desc = {};
+        rtv_desc.Format = g_view_format;
+        rtv_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+        rtv_desc.Texture2D.MipSlice = 0;
+        HRESULT hr = xr.d3d_device->CreateRenderTargetView(sc.images[i].texture, &rtv_desc, sc.rtvs[i].GetAddressOf());
+        if (FAILED(hr)) {
+            spdlog::error("[VR] Failed to create RTV for {} image {}", label, i);
+            return false;
+        }
+
+        // Depth texture
+        D3D11_TEXTURE2D_DESC depth_desc = {};
+        depth_desc.Width = sc.width;
+        depth_desc.Height = sc.height;
+        depth_desc.MipLevels = 1;
+        depth_desc.ArraySize = 1;
+        depth_desc.Format = DXGI_FORMAT_D32_FLOAT;
+        depth_desc.SampleDesc.Count = 1;
+        depth_desc.Usage = D3D11_USAGE_DEFAULT;
+        depth_desc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+
+        hr = xr.d3d_device->CreateTexture2D(&depth_desc, nullptr, sc.depth_textures[i].GetAddressOf());
+        if (FAILED(hr)) {
+            spdlog::error("[VR] Failed to create depth texture for {} image {}", label, i);
+            return false;
+        }
+
+        // DSV
+        D3D11_DEPTH_STENCIL_VIEW_DESC dsv_desc = {};
+        dsv_desc.Format = DXGI_FORMAT_D32_FLOAT;
+        dsv_desc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+        dsv_desc.Texture2D.MipSlice = 0;
+
+        hr = xr.d3d_device->CreateDepthStencilView(sc.depth_textures[i].Get(), &dsv_desc, sc.dsvs[i].GetAddressOf());
+        if (FAILED(hr)) {
+            spdlog::error("[VR] Failed to create DSV for {} image {}", label, i);
+            return false;
+        }
+    }
+#endif
+
+    spdlog::info("[VR] {} swapchain: {}x{}, {} images", label, sc.width, sc.height, image_count);
+    return true;
+}
+
+static void vr_destroy_swapchain(VrSwapchain& sc) {
+#ifdef VR_GLES
+    if (!sc.fbos.empty()) {
+        glDeleteFramebuffers((GLsizei)sc.fbos.size(), sc.fbos.data());
+        sc.fbos.clear();
+    }
+    if (sc.depth_rb != 0) {
+        glDeleteRenderbuffers(1, &sc.depth_rb);
+        sc.depth_rb = 0;
+    }
+#else
+    sc.rtvs.clear();
+    sc.dsvs.clear();
+    sc.depth_textures.clear();
+#endif
+    sc.images.clear();
+    if (sc.handle != XR_NULL_HANDLE) {
+        xrDestroySwapchain(sc.handle);
+        sc.handle = XR_NULL_HANDLE;
+    }
+}
+
+// Make swapchain image `idx` the backend's current render target.
+static void vr_bind_target(VrSwapchain& sc, uint32_t idx) {
+#ifdef VR_GLES
+    xr.ogl->BindExternalFramebuffer(sc.fbos[idx], sc.width, sc.height);
+#else
+    ID3D11RenderTargetView* rtv = sc.rtvs[idx].Get();
+    ID3D11DepthStencilView* dsv = sc.dsvs[idx].Get();
+    xr.d3d_context->OMSetRenderTargets(1, &rtv, dsv);
+    // Tell D3D11 backend the render target height so viewport Y-flip works correctly
+    gfx_d3d11_set_render_target_height(sc.height);
+#endif
+}
+
+// Acquire + wait the next image of sc, bind it, clear it and set a full viewport. Returns the index.
+static uint32_t vr_acquire_and_bind(VrSwapchain& sc, const float clear_color[4], const char* label) {
+    XrSwapchainImageAcquireInfo acquire_info = { XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO };
+    uint32_t image_index = 0;
+    xr_check(xrAcquireSwapchainImage(sc.handle, &acquire_info, &image_index), label);
+
+    XrSwapchainImageWaitInfo wait_info = { XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO };
+    wait_info.timeout = XR_INFINITE_DURATION;
+    xr_check(xrWaitSwapchainImage(sc.handle, &wait_info), label);
+
+    vr_bind_target(sc, image_index);
+#ifdef VR_GLES
+    xr.ogl->ClearCurrentFramebuffer(clear_color[0], clear_color[1], clear_color[2], clear_color[3], true);
+    glViewport(0, 0, sc.width, sc.height);
+#else
+    xr.d3d_context->ClearRenderTargetView(sc.rtvs[image_index].Get(), clear_color);
+    xr.d3d_context->ClearDepthStencilView(sc.dsvs[image_index].Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+
+    D3D11_VIEWPORT viewport = {};
+    viewport.Width = static_cast<float>(sc.width);
+    viewport.Height = static_cast<float>(sc.height);
+    viewport.MinDepth = 0.0f;
+    viewport.MaxDepth = 1.0f;
+    xr.d3d_context->RSSetViewports(1, &viewport);
+#endif
+    // Interpreter renders at the target's size (replaces the old gfx_start_frame override)
+    vr_apply_dimensions(sc.width, sc.height);
+    return image_index;
 }
 
 // --------------------------------------------------------------------------
@@ -742,7 +963,51 @@ static bool vr_pending_heading_yaw(int16_t* out) {
 // Lifecycle
 // --------------------------------------------------------------------------
 
+#ifdef VR_GLES
+// The Android loader must be handed the JavaVM + activity once, before any other OpenXR call.
+static jobject g_activity = nullptr;
+static JavaVM* g_java_vm = nullptr;
+
+static bool vr_init_android_loader() {
+    if (g_activity != nullptr) {
+        return true;
+    }
+    JNIEnv* env = static_cast<JNIEnv*>(SDL_AndroidGetJNIEnv());
+    jobject activity = static_cast<jobject>(SDL_AndroidGetActivity());
+    if (!env || !activity || env->GetJavaVM(&g_java_vm) != JNI_OK) {
+        spdlog::error("[VR] No JNI env/activity for the OpenXR loader");
+        return false;
+    }
+    g_activity = env->NewGlobalRef(activity);
+    env->DeleteLocalRef(activity);
+
+    PFN_xrInitializeLoaderKHR initialize_loader = nullptr;
+    xrGetInstanceProcAddr(XR_NULL_HANDLE, "xrInitializeLoaderKHR",
+                          reinterpret_cast<PFN_xrVoidFunction*>(&initialize_loader));
+    if (!initialize_loader) {
+        spdlog::error("[VR] xrInitializeLoaderKHR unavailable");
+        return false;
+    }
+    XrLoaderInitInfoAndroidKHR loader_info = { XR_TYPE_LOADER_INIT_INFO_ANDROID_KHR };
+    loader_info.applicationVM = g_java_vm;
+    loader_info.applicationContext = g_activity;
+    return xr_check(initialize_loader(reinterpret_cast<const XrLoaderInitInfoBaseHeaderKHR*>(&loader_info)),
+                    "xrInitializeLoaderKHR");
+}
+#endif
+
 bool vr_init() {
+#ifdef VR_GLES
+    // The GL context must be current on this thread (SDL's render thread); OpenXR binds to it.
+    xr.ogl = vr_ogl();
+    if (!xr.ogl || eglGetCurrentContext() == EGL_NO_CONTEXT) {
+        spdlog::error("[VR] GLES context not available");
+        return false;
+    }
+    if (!vr_init_android_loader()) {
+        return false;
+    }
+#else
     // Get D3D11 device
     xr.d3d_device = static_cast<ID3D11Device*>(gfx_d3d11_get_device());
     xr.d3d_context = static_cast<ID3D11DeviceContext*>(gfx_d3d11_get_context());
@@ -750,6 +1015,7 @@ bool vr_init() {
         spdlog::error("[VR] D3D11 device not available");
         return false;
     }
+#endif
 
     // Default configuration
     xr.world_scale = 35.0f;
@@ -795,8 +1061,14 @@ bool vr_init() {
         }
     }
 
+#ifdef VR_GLES
+    const char* extensions[4] = { XR_KHR_OPENGL_ES_ENABLE_EXTENSION_NAME,
+                                  XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME };
+    uint32_t extension_count = 2;
+#else
     const char* extensions[3] = { XR_KHR_D3D11_ENABLE_EXTENSION_NAME };
     uint32_t extension_count = 1;
+#endif
     if (xr.user_presence_supported) {
         extensions[extension_count++] = XR_EXT_USER_PRESENCE_EXTENSION_NAME;
     }
@@ -812,6 +1084,12 @@ bool vr_init() {
     instance_ci.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 0);
     instance_ci.enabledExtensionCount = extension_count;
     instance_ci.enabledExtensionNames = extensions;
+#ifdef VR_GLES
+    XrInstanceCreateInfoAndroidKHR android_ci = { XR_TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR };
+    android_ci.applicationVM = g_java_vm;
+    android_ci.applicationActivity = g_activity;
+    instance_ci.next = &android_ci;
+#endif
 
     if (!xr_check(xrCreateInstance(&instance_ci, &xr.instance), "xrCreateInstance")) {
         spdlog::error("[VR] Failed to create OpenXR instance. Make sure SteamVR is running.");
@@ -827,6 +1105,42 @@ bool vr_init() {
         return false;
     }
 
+#ifdef VR_GLES
+    // --- Check GLES graphics requirements (mandatory call before xrCreateSession) ---
+    PFN_xrGetOpenGLESGraphicsRequirementsKHR xrGetOpenGLESGraphicsRequirementsKHR = nullptr;
+    xrGetInstanceProcAddr(xr.instance, "xrGetOpenGLESGraphicsRequirementsKHR",
+                          reinterpret_cast<PFN_xrVoidFunction*>(&xrGetOpenGLESGraphicsRequirementsKHR));
+
+    XrGraphicsRequirementsOpenGLESKHR gfx_requirements = { XR_TYPE_GRAPHICS_REQUIREMENTS_OPENGL_ES_KHR };
+    if (xrGetOpenGLESGraphicsRequirementsKHR) {
+        xrGetOpenGLESGraphicsRequirementsKHR(xr.instance, xr.system_id, &gfx_requirements);
+        spdlog::info("[VR] GLES requirements: min {}.{}, max {}.{}",
+                     XR_VERSION_MAJOR(gfx_requirements.minApiVersionSupported),
+                     XR_VERSION_MINOR(gfx_requirements.minApiVersionSupported),
+                     XR_VERSION_MAJOR(gfx_requirements.maxApiVersionSupported),
+                     XR_VERSION_MINOR(gfx_requirements.maxApiVersionSupported));
+    }
+
+    // --- Create Session on SDL's EGL context ---
+    XrGraphicsBindingOpenGLESAndroidKHR gl_binding = { XR_TYPE_GRAPHICS_BINDING_OPENGL_ES_ANDROID_KHR };
+    gl_binding.display = eglGetCurrentDisplay();
+    gl_binding.context = eglGetCurrentContext();
+    {
+        EGLint config_id = 0;
+        EGLint num_configs = 0;
+        eglQueryContext(gl_binding.display, gl_binding.context, EGL_CONFIG_ID, &config_id);
+        const EGLint attribs[] = { EGL_CONFIG_ID, config_id, EGL_NONE };
+        if (!eglChooseConfig(gl_binding.display, attribs, &gl_binding.config, 1, &num_configs) || num_configs < 1) {
+            spdlog::error("[VR] Could not find the EGL config of the current context");
+            xrDestroyInstance(xr.instance);
+            xr.instance = XR_NULL_HANDLE;
+            return false;
+        }
+    }
+
+    XrSessionCreateInfo session_ci = { XR_TYPE_SESSION_CREATE_INFO };
+    session_ci.next = &gl_binding;
+#else
     // --- Check D3D11 graphics requirements ---
     PFN_xrGetD3D11GraphicsRequirementsKHR xrGetD3D11GraphicsRequirementsKHR = nullptr;
     xrGetInstanceProcAddr(xr.instance, "xrGetD3D11GraphicsRequirementsKHR",
@@ -843,6 +1157,7 @@ bool vr_init() {
 
     XrSessionCreateInfo session_ci = { XR_TYPE_SESSION_CREATE_INFO };
     session_ci.next = &d3d_binding;
+#endif
     session_ci.systemId = xr.system_id;
     if (!xr_check(xrCreateSession(xr.instance, &session_ci, &xr.session), "xrCreateSession")) {
         xrDestroyInstance(xr.instance);
@@ -919,32 +1234,53 @@ bool vr_init() {
     // The game outputs gamma-encoded (sRGB) colors. The swapchain must be created with an
     // SRGB format so the compositor decodes them correctly; a UNORM swapchain makes the
     // compositor treat gamma values as linear and re-encode them, washing the image out.
-    // Writes still go through a UNORM view (below) so the bits land in the texture verbatim.
-    int64_t chosen_format = formats[0]; // fallback to first supported
-    for (int64_t fmt : formats) {
-        if (fmt == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB) {
-            chosen_format = fmt;
-            break;
+    // Writes must still land in the texture verbatim (D3D11: UNORM view below; GLES: sRGB write
+    // conversion switched off with EXT_sRGB_write_control).
+    bool srgb_ok = true;
+#ifdef VR_GLES
+    {
+        const char* gl_ext = reinterpret_cast<const char*>(glGetString(GL_EXTENSIONS));
+        srgb_ok = gl_ext && strstr(gl_ext, "GL_EXT_sRGB_write_control") != nullptr;
+        if (!srgb_ok) {
+            spdlog::warn("[VR] GL_EXT_sRGB_write_control missing; using a UNORM swapchain (colors will look washed out)");
         }
     }
-    if (chosen_format != DXGI_FORMAT_R8G8B8A8_UNORM_SRGB) {
-        // SRGB not available — pick UNORM as next best, accept the gamma mismatch for now
+#endif
+    int64_t chosen_format = formats[0]; // fallback to first supported
+    if (srgb_ok) {
         for (int64_t fmt : formats) {
-            if (fmt == DXGI_FORMAT_R8G8B8A8_UNORM) {
+            if (fmt == kSwapchainFormatSrgb) {
                 chosen_format = fmt;
                 break;
             }
         }
     }
+    if (chosen_format != kSwapchainFormatSrgb) {
+        // SRGB not available — pick UNORM as next best, accept the gamma mismatch for now
+        for (int64_t fmt : formats) {
+            if (fmt == kSwapchainFormatUnorm) {
+                chosen_format = fmt;
+                break;
+            }
+        }
+    }
+#ifdef VR_GLES
+    if (chosen_format == kSwapchainFormatSrgb) {
+        glDisable(0x8DB9 /* GL_FRAMEBUFFER_SRGB_EXT */);
+    }
+    spdlog::info("[VR] Swapchain format: 0x{:x} (SRGB8_ALPHA8=0x{:x})", chosen_format, kSwapchainFormatSrgb);
+#else
     // OpenXR D3D11 swapchain textures are allocated typeless, so views may use either
     // variant of the format family. Using the UNORM variant for RTVs/SRVs stores and
     // reads the game's already-gamma-encoded output without any extra conversion.
     DXGI_FORMAT view_format = (chosen_format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB)
                                   ? DXGI_FORMAT_R8G8B8A8_UNORM
                                   : static_cast<DXGI_FORMAT>(chosen_format);
+    g_view_format = view_format;
     spdlog::info("[VR] Swapchain format: {} (UNORM={}, SRGB={}), view format: {}",
                  chosen_format, (int)DXGI_FORMAT_R8G8B8A8_UNORM, (int)DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
                  (int)view_format);
+#endif
 
     // --- Create Swapchains (one per eye) ---
     for (uint32_t eye = 0; eye < 2; eye++) {
@@ -966,83 +1302,13 @@ bool vr_init() {
                      xr.config_views[eye].recommendedImageRectWidth, xr.config_views[eye].recommendedImageRectHeight,
                      xr.resolution_scale);
 
-        XrSwapchainCreateInfo swapchain_ci = { XR_TYPE_SWAPCHAIN_CREATE_INFO };
-        swapchain_ci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
-        swapchain_ci.format = chosen_format;
-        swapchain_ci.sampleCount = 1;
-        swapchain_ci.width = sc.width;
-        swapchain_ci.height = sc.height;
-        swapchain_ci.faceCount = 1;
-        swapchain_ci.arraySize = 1;
-        swapchain_ci.mipCount = 1;
-
-        if (!xr_check(xrCreateSwapchain(xr.session, &swapchain_ci, &sc.handle), "xrCreateSwapchain")) {
+        if (!vr_create_swapchain(sc, eye == 0 ? "Eye 0" : "Eye 1")) {
             vr_shutdown();
             return false;
         }
-
-        // Enumerate swapchain images
-        uint32_t image_count = 0;
-        xrEnumerateSwapchainImages(sc.handle, 0, &image_count, nullptr);
-        sc.images.resize(image_count, { XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR });
-        xrEnumerateSwapchainImages(sc.handle, image_count, &image_count,
-                                   reinterpret_cast<XrSwapchainImageBaseHeader*>(sc.images.data()));
-
-        // Create RTVs and depth resources for each swapchain image
-        sc.rtvs.resize(image_count);
-        sc.dsvs.resize(image_count);
-        sc.depth_textures.resize(image_count);
-
-        for (uint32_t i = 0; i < image_count; i++) {
-            // RTV
-            D3D11_RENDER_TARGET_VIEW_DESC rtv_desc = {};
-            rtv_desc.Format = view_format;
-            rtv_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
-            rtv_desc.Texture2D.MipSlice = 0;
-            HRESULT hr = xr.d3d_device->CreateRenderTargetView(
-                sc.images[i].texture, &rtv_desc, sc.rtvs[i].GetAddressOf());
-            if (FAILED(hr)) {
-                spdlog::error("[VR] Failed to create RTV for eye {} image {}", eye, i);
-                vr_shutdown();
-                return false;
-            }
-
-            // Depth texture
-            D3D11_TEXTURE2D_DESC depth_desc = {};
-            depth_desc.Width = sc.width;
-            depth_desc.Height = sc.height;
-            depth_desc.MipLevels = 1;
-            depth_desc.ArraySize = 1;
-            depth_desc.Format = DXGI_FORMAT_D32_FLOAT;
-            depth_desc.SampleDesc.Count = 1;
-            depth_desc.Usage = D3D11_USAGE_DEFAULT;
-            depth_desc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
-
-            hr = xr.d3d_device->CreateTexture2D(&depth_desc, nullptr, sc.depth_textures[i].GetAddressOf());
-            if (FAILED(hr)) {
-                spdlog::error("[VR] Failed to create depth texture for eye {} image {}", eye, i);
-                vr_shutdown();
-                return false;
-            }
-
-            // DSV
-            D3D11_DEPTH_STENCIL_VIEW_DESC dsv_desc = {};
-            dsv_desc.Format = DXGI_FORMAT_D32_FLOAT;
-            dsv_desc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
-            dsv_desc.Texture2D.MipSlice = 0;
-
-            hr = xr.d3d_device->CreateDepthStencilView(
-                sc.depth_textures[i].Get(), &dsv_desc, sc.dsvs[i].GetAddressOf());
-            if (FAILED(hr)) {
-                spdlog::error("[VR] Failed to create DSV for eye {} image {}", eye, i);
-                vr_shutdown();
-                return false;
-            }
-        }
-
-        spdlog::info("[VR] Eye {} swapchain: {}x{}, {} images", eye, sc.width, sc.height, image_count);
     }
 
+#ifndef VR_GLES
     // --- Create desktop mirror texture (a copy of the left eye, shown in the companion window) ---
     {
         const auto& eye0 = xr.eye_swapchains[0];
@@ -1074,6 +1340,7 @@ bool vr_init() {
             spdlog::info("[VR] Desktop mirror texture: {}x{}", eye0.width, eye0.height);
         }
     }
+#endif
 
     // --- Create VIEW reference space (head-locked, for HUD overlay) ---
     XrReferenceSpaceCreateInfo view_space_ci = { XR_TYPE_REFERENCE_SPACE_CREATE_INFO };
@@ -1085,117 +1352,21 @@ bool vr_init() {
     }
 
     // --- Create HUD swapchain (1024x768, 4:3) ---
-    {
-        auto& sc = xr.hud_swapchain;
-        sc.width = 1024;
-        sc.height = 768;
-        sc.format = chosen_format;
-
-        XrSwapchainCreateInfo swapchain_ci = { XR_TYPE_SWAPCHAIN_CREATE_INFO };
-        swapchain_ci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
-        swapchain_ci.format = chosen_format;
-        swapchain_ci.sampleCount = 1;
-        swapchain_ci.width = sc.width;
-        swapchain_ci.height = sc.height;
-        swapchain_ci.faceCount = 1;
-        swapchain_ci.arraySize = 1;
-        swapchain_ci.mipCount = 1;
-
-        if (!xr_check(xrCreateSwapchain(xr.session, &swapchain_ci, &sc.handle), "xrCreateSwapchain (HUD)")) {
-            vr_shutdown();
-            return false;
-        }
-
-        uint32_t image_count = 0;
-        xrEnumerateSwapchainImages(sc.handle, 0, &image_count, nullptr);
-        sc.images.resize(image_count, { XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR });
-        xrEnumerateSwapchainImages(sc.handle, image_count, &image_count,
-                                   reinterpret_cast<XrSwapchainImageBaseHeader*>(sc.images.data()));
-
-        sc.rtvs.resize(image_count);
-        sc.dsvs.resize(image_count);
-        sc.depth_textures.resize(image_count);
-
-        for (uint32_t i = 0; i < image_count; i++) {
-            D3D11_RENDER_TARGET_VIEW_DESC rtv_desc = {};
-            rtv_desc.Format = view_format;
-            rtv_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
-            xr.d3d_device->CreateRenderTargetView(sc.images[i].texture, &rtv_desc, sc.rtvs[i].GetAddressOf());
-
-            D3D11_TEXTURE2D_DESC depth_desc = {};
-            depth_desc.Width = sc.width;
-            depth_desc.Height = sc.height;
-            depth_desc.MipLevels = 1;
-            depth_desc.ArraySize = 1;
-            depth_desc.Format = DXGI_FORMAT_D32_FLOAT;
-            depth_desc.SampleDesc.Count = 1;
-            depth_desc.Usage = D3D11_USAGE_DEFAULT;
-            depth_desc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
-            xr.d3d_device->CreateTexture2D(&depth_desc, nullptr, sc.depth_textures[i].GetAddressOf());
-
-            D3D11_DEPTH_STENCIL_VIEW_DESC dsv_desc = {};
-            dsv_desc.Format = DXGI_FORMAT_D32_FLOAT;
-            dsv_desc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
-            xr.d3d_device->CreateDepthStencilView(sc.depth_textures[i].Get(), &dsv_desc, sc.dsvs[i].GetAddressOf());
-        }
-        spdlog::info("[VR] HUD swapchain: {}x{}, {} images", sc.width, sc.height, image_count);
+    xr.hud_swapchain.width = 1024;
+    xr.hud_swapchain.height = 768;
+    xr.hud_swapchain.format = chosen_format;
+    if (!vr_create_swapchain(xr.hud_swapchain, "HUD")) {
+        vr_shutdown();
+        return false;
     }
 
     // --- Create flat-screen swapchain (whole-frame panel for 2D contexts: file select, pause) ---
-    {
-        auto& sc = xr.screen_swapchain;
-        sc.width = 1280;
-        sc.height = 960;
-        sc.format = chosen_format;
-
-        XrSwapchainCreateInfo swapchain_ci = { XR_TYPE_SWAPCHAIN_CREATE_INFO };
-        swapchain_ci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
-        swapchain_ci.format = chosen_format;
-        swapchain_ci.sampleCount = 1;
-        swapchain_ci.width = sc.width;
-        swapchain_ci.height = sc.height;
-        swapchain_ci.faceCount = 1;
-        swapchain_ci.arraySize = 1;
-        swapchain_ci.mipCount = 1;
-
-        if (!xr_check(xrCreateSwapchain(xr.session, &swapchain_ci, &sc.handle), "xrCreateSwapchain (screen)")) {
-            vr_shutdown();
-            return false;
-        }
-
-        uint32_t image_count = 0;
-        xrEnumerateSwapchainImages(sc.handle, 0, &image_count, nullptr);
-        sc.images.resize(image_count, { XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR });
-        xrEnumerateSwapchainImages(sc.handle, image_count, &image_count,
-                                   reinterpret_cast<XrSwapchainImageBaseHeader*>(sc.images.data()));
-
-        sc.rtvs.resize(image_count);
-        sc.dsvs.resize(image_count);
-        sc.depth_textures.resize(image_count);
-
-        for (uint32_t i = 0; i < image_count; i++) {
-            D3D11_RENDER_TARGET_VIEW_DESC rtv_desc = {};
-            rtv_desc.Format = view_format;
-            rtv_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
-            xr.d3d_device->CreateRenderTargetView(sc.images[i].texture, &rtv_desc, sc.rtvs[i].GetAddressOf());
-
-            D3D11_TEXTURE2D_DESC depth_desc = {};
-            depth_desc.Width = sc.width;
-            depth_desc.Height = sc.height;
-            depth_desc.MipLevels = 1;
-            depth_desc.ArraySize = 1;
-            depth_desc.Format = DXGI_FORMAT_D32_FLOAT;
-            depth_desc.SampleDesc.Count = 1;
-            depth_desc.Usage = D3D11_USAGE_DEFAULT;
-            depth_desc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
-            xr.d3d_device->CreateTexture2D(&depth_desc, nullptr, sc.depth_textures[i].GetAddressOf());
-
-            D3D11_DEPTH_STENCIL_VIEW_DESC dsv_desc = {};
-            dsv_desc.Format = DXGI_FORMAT_D32_FLOAT;
-            dsv_desc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
-            xr.d3d_device->CreateDepthStencilView(sc.depth_textures[i].Get(), &dsv_desc, sc.dsvs[i].GetAddressOf());
-        }
-        spdlog::info("[VR] Screen swapchain: {}x{}, {} images", sc.width, sc.height, image_count);
+    xr.screen_swapchain.width = 1280;
+    xr.screen_swapchain.height = 960;
+    xr.screen_swapchain.format = chosen_format;
+    if (!vr_create_swapchain(xr.screen_swapchain, "Screen")) {
+        vr_shutdown();
+        return false;
     }
 
     // Initialize views
@@ -1214,34 +1385,18 @@ void vr_shutdown() {
     vrphys_reset();
 
     for (uint32_t eye = 0; eye < 2; eye++) {
-        auto& sc = xr.eye_swapchains[eye];
-        sc.rtvs.clear();
-        sc.dsvs.clear();
-        sc.depth_textures.clear();
-        sc.images.clear();
-        if (sc.handle != XR_NULL_HANDLE) {
-            xrDestroySwapchain(sc.handle);
-            sc.handle = XR_NULL_HANDLE;
-        }
+        vr_destroy_swapchain(xr.eye_swapchains[eye]);
     }
-
-    {
-        auto& sc = xr.hud_swapchain;
-        sc.rtvs.clear(); sc.dsvs.clear(); sc.depth_textures.clear(); sc.images.clear();
-        if (sc.handle != XR_NULL_HANDLE) { xrDestroySwapchain(sc.handle); sc.handle = XR_NULL_HANDLE; }
-    }
-
-    {
-        auto& sc = xr.screen_swapchain;
-        sc.rtvs.clear(); sc.dsvs.clear(); sc.depth_textures.clear(); sc.images.clear();
-        if (sc.handle != XR_NULL_HANDLE) { xrDestroySwapchain(sc.handle); sc.handle = XR_NULL_HANDLE; }
-    }
+    vr_destroy_swapchain(xr.hud_swapchain);
+    vr_destroy_swapchain(xr.screen_swapchain);
     xr.eyes_ever_rendered = false;
     xr.flat_screen = false;
     xr.flat_screen_prev = false;
 
+#ifndef VR_GLES
     xr.mirror_srv.Reset();
     xr.mirror_texture.Reset();
+#endif
     if (xr.view_space != XR_NULL_HANDLE) {
         xrDestroySpace(xr.view_space);
         xr.view_space = XR_NULL_HANDLE;
@@ -1794,43 +1949,8 @@ void vr_begin_eye(int eye) {
     xr.current_eye = eye;
     xr.eyes_ever_rendered = true;
 
-    auto& sc = xr.eye_swapchains[eye];
-
-    // Acquire swapchain image
-    XrSwapchainImageAcquireInfo acquire_info = { XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO };
-    uint32_t image_index = 0;
-    xr_check(xrAcquireSwapchainImage(sc.handle, &acquire_info, &image_index), "xrAcquireSwapchainImage");
-    xr.current_image_index[eye] = image_index;
-
-    // Wait for it to be ready
-    XrSwapchainImageWaitInfo wait_info = { XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO };
-    wait_info.timeout = XR_INFINITE_DURATION;
-    xr_check(xrWaitSwapchainImage(sc.handle, &wait_info), "xrWaitSwapchainImage");
-
-    // Bind render target
-    ID3D11RenderTargetView* rtv = sc.rtvs[image_index].Get();
-    ID3D11DepthStencilView* dsv = sc.dsvs[image_index].Get();
-    xr.d3d_context->OMSetRenderTargets(1, &rtv, dsv);
-
-    // Clear
-    float clear_color[] = { 0.0f, 0.0f, 0.0f, 1.0f };
-    xr.d3d_context->ClearRenderTargetView(rtv, clear_color);
-    xr.d3d_context->ClearDepthStencilView(dsv, D3D11_CLEAR_DEPTH, 1.0f, 0);
-
-    // Set viewport
-    D3D11_VIEWPORT viewport = {};
-    viewport.TopLeftX = 0;
-    viewport.TopLeftY = 0;
-    viewport.Width = static_cast<float>(sc.width);
-    viewport.Height = static_cast<float>(sc.height);
-    viewport.MinDepth = 0.0f;
-    viewport.MaxDepth = 1.0f;
-    xr.d3d_context->RSSetViewports(1, &viewport);
-
-    // Tell D3D11 backend the render target height so viewport Y-flip works correctly
-    gfx_d3d11_set_render_target_height(sc.height);
-    // Interpreter renders at the eye texture's size (replaces the old gfx_start_frame override)
-    vr_apply_dimensions(sc.width, sc.height);
+    const float clear_color[] = { 0.0f, 0.0f, 0.0f, 1.0f };
+    xr.current_image_index[eye] = vr_acquire_and_bind(xr.eye_swapchains[eye], clear_color, "Eye swapchain image");
 }
 
 void vr_end_eye(int eye) {
@@ -2542,28 +2662,13 @@ void vr_rebind_current_eye_target() {
     // Restore whichever target is ACTUALLY being rendered: the flat-screen panel or the HUD when a
     // 2D pass is active (the pause menu runs framebuffer copies mid-pass — blindly rebinding an eye
     // here used to dump the inventory into the stale right-eye image), else the current eye.
-    ID3D11RenderTargetView* rtv;
-    ID3D11DepthStencilView* dsv;
-    uint32_t height;
     if (xr.rendering_screen) {
-        auto& sc = xr.screen_swapchain;
-        rtv = sc.rtvs[xr.screen_image_index].Get();
-        dsv = sc.dsvs[xr.screen_image_index].Get();
-        height = sc.height;
+        vr_bind_target(xr.screen_swapchain, xr.screen_image_index);
     } else if (xr.rendering_hud) {
-        auto& sc = xr.hud_swapchain;
-        rtv = sc.rtvs[xr.hud_image_index].Get();
-        dsv = sc.dsvs[xr.hud_image_index].Get();
-        height = sc.height;
+        vr_bind_target(xr.hud_swapchain, xr.hud_image_index);
     } else {
-        auto& sc = xr.eye_swapchains[xr.current_eye];
-        uint32_t idx = xr.current_image_index[xr.current_eye];
-        rtv = sc.rtvs[idx].Get();
-        dsv = sc.dsvs[idx].Get();
-        height = sc.height;
+        vr_bind_target(xr.eye_swapchains[xr.current_eye], xr.current_image_index[xr.current_eye]);
     }
-    xr.d3d_context->OMSetRenderTargets(1, &rtv, dsv);
-    gfx_d3d11_set_render_target_height(height);
 }
 
 // --------------------------------------------------------------------------
@@ -2578,33 +2683,8 @@ void vr_begin_hud() {
     xr.rendering_hud = true;
     xr.hud_ever_rendered = true;
 
-    auto& sc = xr.hud_swapchain;
-    XrSwapchainImageAcquireInfo acquire_info = { XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO };
-    uint32_t image_index = 0;
-    xr_check(xrAcquireSwapchainImage(sc.handle, &acquire_info, &image_index), "xrAcquireSwapchainImage (HUD)");
-    xr.hud_image_index = image_index;
-
-    XrSwapchainImageWaitInfo wait_info = { XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO };
-    wait_info.timeout = XR_INFINITE_DURATION;
-    xr_check(xrWaitSwapchainImage(sc.handle, &wait_info), "xrWaitSwapchainImage (HUD)");
-
-    ID3D11RenderTargetView* rtv = sc.rtvs[image_index].Get();
-    ID3D11DepthStencilView* dsv = sc.dsvs[image_index].Get();
-    xr.d3d_context->OMSetRenderTargets(1, &rtv, dsv);
-
-    float clear_color[] = { 0.0f, 0.0f, 0.0f, 0.0f }; // Transparent
-    xr.d3d_context->ClearRenderTargetView(rtv, clear_color);
-    xr.d3d_context->ClearDepthStencilView(dsv, D3D11_CLEAR_DEPTH, 1.0f, 0);
-
-    D3D11_VIEWPORT viewport = {};
-    viewport.Width = static_cast<float>(sc.width);
-    viewport.Height = static_cast<float>(sc.height);
-    viewport.MinDepth = 0.0f;
-    viewport.MaxDepth = 1.0f;
-    xr.d3d_context->RSSetViewports(1, &viewport);
-
-    gfx_d3d11_set_render_target_height(sc.height);
-    vr_apply_dimensions(sc.width, sc.height);
+    const float clear_color[] = { 0.0f, 0.0f, 0.0f, 0.0f }; // Transparent
+    xr.hud_image_index = vr_acquire_and_bind(xr.hud_swapchain, clear_color, "HUD swapchain image");
 }
 
 void vr_end_hud() {
@@ -2641,33 +2721,8 @@ void vr_begin_screen() {
     xr.rendering_screen = true;
     xr.screen_ever_rendered = true;
 
-    auto& sc = xr.screen_swapchain;
-    XrSwapchainImageAcquireInfo acquire_info = { XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO };
-    uint32_t image_index = 0;
-    xr_check(xrAcquireSwapchainImage(sc.handle, &acquire_info, &image_index), "xrAcquireSwapchainImage (screen)");
-    xr.screen_image_index = image_index;
-
-    XrSwapchainImageWaitInfo wait_info = { XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO };
-    wait_info.timeout = XR_INFINITE_DURATION;
-    xr_check(xrWaitSwapchainImage(sc.handle, &wait_info), "xrWaitSwapchainImage (screen)");
-
-    ID3D11RenderTargetView* rtv = sc.rtvs[image_index].Get();
-    ID3D11DepthStencilView* dsv = sc.dsvs[image_index].Get();
-    xr.d3d_context->OMSetRenderTargets(1, &rtv, dsv);
-
-    float clear_color[] = { 0.0f, 0.0f, 0.0f, 1.0f }; // Opaque black
-    xr.d3d_context->ClearRenderTargetView(rtv, clear_color);
-    xr.d3d_context->ClearDepthStencilView(dsv, D3D11_CLEAR_DEPTH, 1.0f, 0);
-
-    D3D11_VIEWPORT viewport = {};
-    viewport.Width = static_cast<float>(sc.width);
-    viewport.Height = static_cast<float>(sc.height);
-    viewport.MinDepth = 0.0f;
-    viewport.MaxDepth = 1.0f;
-    xr.d3d_context->RSSetViewports(1, &viewport);
-
-    gfx_d3d11_set_render_target_height(sc.height);
-    vr_apply_dimensions(sc.width, sc.height);
+    const float clear_color[] = { 0.0f, 0.0f, 0.0f, 1.0f }; // Opaque black
+    xr.screen_image_index = vr_acquire_and_bind(xr.screen_swapchain, clear_color, "Screen swapchain image");
 }
 
 void vr_end_screen() {
@@ -2697,6 +2752,13 @@ void vr_get_2d_target_size(uint32_t* w, uint32_t* h) {
 // Desktop mirror
 // --------------------------------------------------------------------------
 
+#ifdef VR_GLES
+void vr_capture_mirror() {}
+
+void* vr_get_mirror_texture_id() {
+    return nullptr;
+}
+#else
 void vr_capture_mirror() {
     if (!xr.initialized || !xr.mirror_texture) return;
 
@@ -2715,8 +2777,9 @@ void vr_capture_mirror() {
 void* vr_get_mirror_texture_id() {
     return xr.mirror_srv.Get();
 }
+#endif
 
-#else // !ENABLE_DX11
+#else // !(ENABLE_DX11 || VR_GLES)
 #include <cstring>
 
 // Stubs for non-D3D11 builds

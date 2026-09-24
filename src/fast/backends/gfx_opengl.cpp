@@ -865,6 +865,39 @@ void GfxRenderingAPIOGL::ClearFramebuffer(bool color, bool depth) {
     }
 }
 
+void GfxRenderingAPIOGL::BindExternalFramebuffer(GLuint fbo, uint32_t width, uint32_t height) {
+    if (mExternalFrameBuffer == 0) {
+        mExternalFrameBuffer = mFrameBuffers.size();
+        mFrameBuffers.resize(mExternalFrameBuffer + 1);
+    }
+    FramebufferOGL& fb = mFrameBuffers[mExternalFrameBuffer];
+    fb.fbo = fbo;
+    fb.width = width;
+    fb.height = height;
+    fb.has_depth_buffer = true;
+    fb.msaa_level = 1;
+    fb.invertY = false;
+    fb.clrbuf = fb.clrbufMsaa = fb.rbo = 0;
+
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    mCurrentFrameBuffer = mExternalFrameBuffer;
+}
+
+void GfxRenderingAPIOGL::ClearCurrentFramebuffer(float r, float g, float b, float a, bool depth) {
+    if (mLastScissorEnabled != 0) {
+        mLastScissorEnabled = 0;
+        glDisable(GL_SCISSOR_TEST);
+    }
+    glDepthMask(GL_TRUE);
+    glClearColor(r, g, b, a);
+    glClear(GL_COLOR_BUFFER_BIT | (depth ? GL_DEPTH_BUFFER_BIT : 0));
+    glDepthMask(mCurrentDepthMask ? GL_TRUE : GL_FALSE);
+    if (mLastScissorEnabled != 1) {
+        mLastScissorEnabled = 1;
+        glEnable(GL_SCISSOR_TEST);
+    }
+}
+
 void GfxRenderingAPIOGL::ClearDepthRegion(int x, int y, int w, int h) {
     // Save current scissor state so callers don't need to manually invalidate.
     GLint prevScissor[4];

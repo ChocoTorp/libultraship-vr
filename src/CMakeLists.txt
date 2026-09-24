@@ -107,6 +107,14 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_link_libraries(libultraship PRIVATE OpenXR::openxr_loader)
 endif()
 
+# QuestShip: OpenXR over GLES on Android (Meta Quest). The loader comes from the Khronos
+# openxr_loader_for_android AAR through Gradle prefab.
+if (CMAKE_SYSTEM_NAME STREQUAL "Android")
+    find_package(OpenXR REQUIRED CONFIG)
+    target_link_libraries(libultraship PRIVATE OpenXR::openxr_loader EGL)
+    target_compile_definitions(libultraship PRIVATE VR_GLES)
+endif()
+
 if (CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     set(THREADS_PREFER_PTHREAD_FLAG ON)
     find_package(Threads REQUIRED)
