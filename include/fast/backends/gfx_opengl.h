@@ -40,6 +40,14 @@ struct ShaderProgram {
     GLint texture_width_location;
     GLint texture_height_location;
     GLint texture_filtering_location;
+    // QuestShip single-pass stereo: the same combiner compiled with a GL_OVR_multiview2 vertex
+    // shader, built lazily and used whenever the bound target is a multiview framebuffer.
+    uint64_t shaderId0 = 0;
+    uint64_t shaderId1 = 0;
+    bool multiview = false;
+    ShaderProgram* mvTwin = nullptr;
+    GLint vrViewProjLocation = -1;
+    GLint vrWorldLocation = -1;
 };
 
 struct FramebufferOGL {
@@ -110,12 +118,19 @@ class GfxRenderingAPIOGL final : public GfxRenderingAPI {
     // SOH [VR] (QuestShip) The VR layer renders into OpenXR swapchain images through FBOs it owns.
     // Binding one here registers it as a framebuffer slot, so viewport/scissor math, clip Y-inversion
     // and noise all see the XR image's real size (GL convention, not inverted).
-    void BindExternalFramebuffer(GLuint fbo, uint32_t width, uint32_t height);
+    void BindExternalFramebuffer(GLuint fbo, uint32_t width, uint32_t height, bool multiview = false);
+    // QuestShip single-pass stereo: both eyes' view-projection (2 x row-major 4x4, row-vector
+    // convention) for the multiview vertex shader, and world- vs clip-space positions.
+    void SetStereoViewProj(const float* vp32);
+    void SetStereoWorldSpace(bool worldSpace) override;
     void ClearCurrentFramebuffer(float r, float g, float b, float a, bool depth);
 
   private:
     void SetUniforms(ShaderProgram* prg) const;
     std::string BuildFsShader(const CCFeatures& cc_features);
+    void BuildProgram(uint64_t shaderId0, uint64_t shaderId1, bool multiview, ShaderProgram* prg);
+    ShaderProgram* MultiviewTwin(ShaderProgram* prg);
+    void SetMultiviewTarget(bool multiview);
     void SetPerDrawUniforms();
 
     std::vector<TextureInfo> textures;
@@ -127,6 +142,11 @@ class GfxRenderingAPIOGL final : public GfxRenderingAPI {
     int8_t mLastScissorEnabled = -1;
 
     std::map<std::pair<uint64_t, uint32_t>, ShaderProgram> mShaderProgramPool;
+    std::map<std::pair<uint64_t, uint32_t>, ShaderProgram> mMvShaderProgramPool; // QuestShip multiview twins
+    ShaderProgram* mRequestedShader = nullptr; // what the interpreter asked for (base variant)
+    bool mMultiviewTarget = false;
+    bool mStereoWorld = false;
+    float mStereoViewProj[32] = {};
     ShaderProgram* mCurrentShaderProgram;
     ShaderProgram* mLastLoadedShader = nullptr;
 

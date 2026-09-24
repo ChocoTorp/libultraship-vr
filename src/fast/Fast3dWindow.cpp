@@ -297,6 +297,11 @@ bool Fast3dWindow::DrawAndRunGraphicsCommands(Gfx* commands, const std::unordere
                     vr_begin_screen();
                     mInterpreter->Run(commands, mtxReplacements);
                     vr_end_screen();
+                } else if (vr_is_multiview()) {
+                    // QuestShip: single-pass stereo — one interpreter pass renders both eyes.
+                    vr_begin_stereo();
+                    mInterpreter->Run(commands, mtxReplacements);
+                    vr_end_stereo();
                 } else {
                     for (int eye = 0; eye < 2; eye++) {
                         vr_begin_eye(eye);

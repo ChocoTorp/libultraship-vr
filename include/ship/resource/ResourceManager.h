@@ -332,6 +332,10 @@ class ResourceManager {
     uint64_t GetCacheGeneration() const {
         return mCacheGeneration.load(std::memory_order_relaxed);
     }
+    // QuestShip: fire-and-forget parallel preload of the ALT (texture-pack) versions of texture
+    // files matching `searchMask` (e.g. "scenes/shared/spot00_scene/*"), on the worker pool at
+    // low priority. A newer call cancels the remaining work of an older one.
+    void PreloadAltTexturesAsync(const std::string& searchMask);
 
     /**
      * @brief Enables or disables alt-asset (mod) loading.
@@ -433,6 +437,7 @@ class ResourceManager {
     std::mutex mMutex;
     bool mAltAssetsEnabled = false;
     std::atomic<uint64_t> mCacheGeneration{ 0 };
+    std::atomic<uint64_t> mPreloadGeneration{ 0 };
     // Private information for which owner and archive are default.
     uintptr_t mDefaultCacheOwner = 0;
     std::shared_ptr<Archive> mDefaultCacheArchive = nullptr;

@@ -13,6 +13,7 @@
 #include <vector>
 #include <unordered_set>
 #include <mutex>
+#include <condition_variable>
 #include <StormLib.h>
 
 #include "ship/resource/Resource.h"
@@ -75,6 +76,15 @@ class OtrArchive final : virtual public Archive {
 
   private:
     HANDLE mHandle;
+    // QuestShip: StormLib handles are not thread-safe (one shared file position per handle), so
+    // concurrent readers each borrow a handle from a small pool of independent opens of the same
+    // MPQ. mHandle is the first one and stays in the pool.
+    HANDLE AcquireHandle();
+    void ReleaseHandle(HANDLE handle);
+    std::mutex mPoolMutex;
+    std::condition_variable mPoolCv;
+    std::vector<HANDLE> mFreeHandles;
+    std::vector<HANDLE> mAllHandles;
 };
 } // namespace Ship
 

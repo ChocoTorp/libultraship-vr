@@ -29,6 +29,11 @@ struct hash_pair_ff {
 
 class GfxRenderingAPI {
   public:
+    // QuestShip single-pass stereo: world-space vertex positions (true) vs clip-space (false) for
+    // the following draws. Only the GLES multiview backend acts on it.
+    virtual void SetStereoWorldSpace(bool worldSpace) {
+        (void)worldSpace;
+    }
     virtual ~GfxRenderingAPI() = default;
     virtual const char* GetName() = 0;
     virtual int GetMaxTextureSize() = 0;

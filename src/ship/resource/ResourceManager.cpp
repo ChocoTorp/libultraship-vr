@@ -153,6 +153,7 @@ std::shared_ptr<IResource> ResourceManager::LoadResourceProcess(const ResourceId
     auto file = LoadFileProcess(identifier.Path);
     if (file == nullptr) {
         SPDLOG_TRACE("Failed to load resource file at path {}", identifier.Path);
+        const std::lock_guard<std::mutex> lock(mMutex); // QuestShip: was an unlocked cache write
         mResourceCache[identifier] = ResourceLoadError::NotFound;
         return nullptr;
     }
@@ -409,13 +410,62 @@ size_t ResourceManager::UnloadResource(const ResourceIdentifier& identifier) {
     std::variant<ResourceLoadError, std::shared_ptr<IResource>> value = nullptr;
     size_t ret = 0;
     // We can only erase the resource if we have any resources for that owner.
-    if (mResourceCache.contains(identifier)) {
-        const std::lock_guard<std::mutex> lock(mMutex);
-        mResourceCache.erase(identifier);
-        mCacheGeneration++;
+    {
+        const std::lock_guard<std::mutex> lock(mMutex); // QuestShip: check under the lock too
+        if (mResourceCache.contains(identifier)) {
+            mResourceCache.erase(identifier);
+            mCacheGeneration++;
+        }
     }
 
     return ret;
+}
+
+void ResourceManager::PreloadAltTexturesAsync(const std::string& searchMask) {
+    if (!mAltAssetsEnabled || mThreadPool == nullptr) {
+        return;
+    }
+    const uint64_t gen = ++mPreloadGeneration;
+    mThreadPool->detach_task(
+        [this, searchMask, gen]() {
+            auto files = GetArchiveManager()->ListFiles(searchMask);
+            std::vector<std::string> todo;
+            for (const auto& path : *files) {
+                if (mPreloadGeneration.load() != gen) {
+                    return;
+                }
+                if (path.starts_with(IResource::gAltAssetPrefix)) {
+                    continue;
+                }
+                // Textures and palettes only: their factory never nests resource loads (other
+                // factories do, and a pool worker blocking on the pool can deadlock).
+                if (path.find("Tex") == std::string::npos && path.find("TLUT") == std::string::npos) {
+                    continue;
+                }
+                if (!GetArchiveManager()->HasFile(IResource::gAltAssetPrefix + path)) {
+                    continue; // no HD replacement: the vanilla read is cheap
+                }
+                todo.push_back(path);
+            }
+            SPDLOG_INFO("[Preload] {}: {} HD textures", searchMask, todo.size());
+            constexpr size_t kBatch = 4;
+            for (size_t i = 0; i < todo.size(); i += kBatch) {
+                std::vector<std::string> batch(todo.begin() + i, todo.begin() + std::min(todo.size(), i + kBatch));
+                mThreadPool->detach_task(
+                    [this, batch = std::move(batch), gen]() {
+                        for (const auto& path : batch) {
+                            if (mPreloadGeneration.load() != gen) {
+                                return;
+                            }
+                            // Resolves (and caches) the alt version first, exactly like the renderer's
+                            // own lookup of `path` would.
+                            LoadResourceProcess(path);
+                        }
+                    },
+                    BS::pr::low);
+            }
+        },
+        BS::pr::low);
 }
 
 size_t ResourceManager::UnloadResource(const std::string& filePath) {

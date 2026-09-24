@@ -71,6 +71,10 @@ void GfxRenderingAPIOGL::SetUniforms(ShaderProgram* prg) const {
 
 void GfxRenderingAPIOGL::SetPerDrawUniforms() {
     glUniform1f(mCurrentShaderProgram->prim_depth_location, mCurrentPrimDepth);
+    if (mCurrentShaderProgram->multiview) {
+        glUniformMatrix4fv(mCurrentShaderProgram->vrViewProjLocation, 2, GL_FALSE, mStereoViewProj);
+        glUniform1i(mCurrentShaderProgram->vrWorldLocation, mStereoWorld ? 1 : 0);
+    }
 
     if (mCurrentShaderProgram->usedTextures[0] || mCurrentShaderProgram->usedTextures[1]) {
         GLint filtering[2] = { textures[mCurrentTextureIds[0]].filtering, textures[mCurrentTextureIds[1]].filtering };
@@ -85,6 +89,10 @@ void GfxRenderingAPIOGL::SetPerDrawUniforms() {
 }
 
 void GfxRenderingAPIOGL::UnloadShader(ShaderProgram* old_prg) {
+    // The interpreter passes the base program; the bound one may be its multiview twin.
+    if (old_prg != nullptr && mLastLoadedShader != nullptr && old_prg->mvTwin == mLastLoadedShader) {
+        old_prg = mLastLoadedShader;
+    }
     if (old_prg != nullptr && old_prg == mLastLoadedShader) {
         for (unsigned int i = 0; i < old_prg->numAttribs; i++) {
             if (old_prg->attribLocations[i] >= 0) {
@@ -97,6 +105,11 @@ void GfxRenderingAPIOGL::UnloadShader(ShaderProgram* old_prg) {
 
 void GfxRenderingAPIOGL::LoadShader(ShaderProgram* new_prg) {
     // if (!new_prg) return;
+    // QuestShip: a multiview target needs the multiview variant of whatever the interpreter asked for.
+    mRequestedShader = new_prg;
+    if (mMultiviewTarget && new_prg != nullptr && !new_prg->multiview) {
+        new_prg = MultiviewTwin(new_prg);
+    }
     mCurrentShaderProgram = new_prg;
     if (new_prg != mLastLoadedShader) {
         glUseProgram(new_prg->openglProgramId);
@@ -348,7 +361,7 @@ static prism::ContextTypes* UpdateFloats(prism::ContextTypes* _, prism::ContextT
     return nullptr;
 }
 
-static std::string BuildVsShader(const CCFeatures& cc_features) {
+static std::string BuildVsShader(const CCFeatures& cc_features, bool multiview) {
     numFloats = 4;
     prism::Processor processor;
     prism::ContextItems mContext = { { "VERTEX_SHADER", true },
@@ -401,6 +414,23 @@ static std::string BuildVsShader(const CCFeatures& cc_features) {
     processor.load(*shader);
     processor.bind_include_loader(opengl_include_fs);
     auto result = processor.process();
+    if (multiview) {
+        // QuestShip single-pass stereo: one draw renders both eye layers; the vertex position is
+        // world-space when uVrWorld != 0 (row-major engine matrix uploaded as-is, so M * v in GLSL
+        // equals the engine's row-vector v * M), else already clip-space (2D rects, passthrough).
+        const std::string ver = "#version 300 es";
+        const std::string pos = "gl_Position = aVtxPos;";
+        const size_t vi = result.find(ver);
+        const size_t pi = result.find(pos);
+        if (vi == std::string::npos || pi == std::string::npos) {
+            SPDLOG_ERROR("[GL] multiview vertex shader patch failed");
+        } else {
+            result.replace(pi, pos.size(),
+                           "gl_Position = (uVrWorld != 0) ? (uVrViewProj[int(gl_ViewID_OVR)] * aVtxPos) : aVtxPos;");
+            result.insert(vi + ver.size(), "\n#extension GL_OVR_multiview2 : require\nlayout(num_views = 2) in;\n"
+                                           "uniform mat4 uVrViewProj[2];\nuniform int uVrWorld;\n");
+        }
+    }
     // SPDLOG_INFO("=========== VERTEX SHADER ============");
     // SPDLOG_INFO(result);
     // SPDLOG_INFO("========================================");
@@ -411,11 +441,11 @@ void GfxRenderingAPIOGL::ClearShaderCache() {
     mShaderProgramPool.clear();
 }
 
-ShaderProgram* GfxRenderingAPIOGL::CreateAndLoadNewShader(uint64_t shader_id0, uint64_t shader_id1) {
+void GfxRenderingAPIOGL::BuildProgram(uint64_t shader_id0, uint64_t shader_id1, bool multiview, ShaderProgram* prg) {
     CCFeatures cc_features;
     gfx_cc_get_features(shader_id0, shader_id1, &cc_features);
     const auto fs_buf = BuildFsShader(cc_features);
-    const auto vs_buf = BuildVsShader(cc_features);
+    const auto vs_buf = BuildVsShader(cc_features, multiview);
     const GLchar* sources[2] = { vs_buf.data(), fs_buf.data() };
     const GLint lengths[2] = { (GLint)vs_buf.size(), (GLint)fs_buf.size() };
     GLint success;
@@ -455,7 +485,6 @@ ShaderProgram* GfxRenderingAPIOGL::CreateAndLoadNewShader(uint64_t shader_id0, u
 
     size_t cnt = 0;
 
-    struct ShaderProgram* prg = &mShaderProgramPool[std::make_pair(shader_id0, shader_id1)];
     prg->attribLocations[cnt] = glGetAttribLocation(shader_program, "aVtxPos");
     prg->attribSizes[cnt] = 4;
     ++cnt;
@@ -517,7 +546,16 @@ ShaderProgram* GfxRenderingAPIOGL::CreateAndLoadNewShader(uint64_t shader_id0, u
     prg->texture_height_location = glGetUniformLocation(shader_program, "texture_height");
     prg->texture_filtering_location = glGetUniformLocation(shader_program, "texture_filtering");
 
-    LoadShader(prg);
+    prg->shaderId0 = shader_id0;
+    prg->shaderId1 = shader_id1;
+    prg->multiview = multiview;
+    prg->mvTwin = nullptr;
+    prg->vrViewProjLocation = multiview ? glGetUniformLocation(shader_program, "uVrViewProj") : -1;
+    prg->vrWorldLocation = multiview ? glGetUniformLocation(shader_program, "uVrWorld") : -1;
+
+    // Sampler bindings need the program current; force the next LoadShader to rebind.
+    glUseProgram(shader_program);
+    mLastLoadedShader = nullptr;
 
     if (cc_features.usedTextures[0]) {
         GLint sampler_location = glGetUniformLocation(shader_program, "uTex0");
@@ -544,7 +582,23 @@ ShaderProgram* GfxRenderingAPIOGL::CreateAndLoadNewShader(uint64_t shader_id0, u
         glUniform1i(sampler_location, 5);
     }
 
+}
+
+ShaderProgram* GfxRenderingAPIOGL::CreateAndLoadNewShader(uint64_t shader_id0, uint64_t shader_id1) {
+    struct ShaderProgram* prg = &mShaderProgramPool[std::make_pair(shader_id0, shader_id1)];
+    BuildProgram(shader_id0, shader_id1, false, prg);
+    LoadShader(prg);
     return prg;
+}
+
+// QuestShip: lazily compiled multiview variant of a base program.
+ShaderProgram* GfxRenderingAPIOGL::MultiviewTwin(ShaderProgram* prg) {
+    if (prg->mvTwin == nullptr) {
+        ShaderProgram* twin = &mMvShaderProgramPool[std::make_pair(prg->shaderId0, (uint32_t)prg->shaderId1)];
+        BuildProgram(prg->shaderId0, prg->shaderId1, true, twin);
+        prg->mvTwin = twin;
+    }
+    return prg->mvTwin;
 }
 
 struct ShaderProgram* GfxRenderingAPIOGL::LookupShader(uint64_t shader_id0, uint64_t shader_id1) {
@@ -941,6 +995,7 @@ void GfxRenderingAPIOGL::StartDrawToFramebuffer(int fb_id, float noise_scale) {
     }
     glBindFramebuffer(GL_FRAMEBUFFER, fb.fbo);
     mCurrentFrameBuffer = fb_id;
+    SetMultiviewTarget(false);
 }
 
 void GfxRenderingAPIOGL::ClearFramebuffer(bool color, bool depth) {
@@ -958,7 +1013,28 @@ void GfxRenderingAPIOGL::ClearFramebuffer(bool color, bool depth) {
     }
 }
 
-void GfxRenderingAPIOGL::BindExternalFramebuffer(GLuint fbo, uint32_t width, uint32_t height) {
+// QuestShip: switching between a multiview target and a normal one swaps the bound program
+// variant (a multiview program on a single-layer framebuffer, or vice versa, is a GL error).
+void GfxRenderingAPIOGL::SetMultiviewTarget(bool multiview) {
+    if (multiview == mMultiviewTarget) {
+        return;
+    }
+    mMultiviewTarget = multiview;
+    if (mRequestedShader != nullptr) {
+        UnloadShader(mRequestedShader);
+        LoadShader(mRequestedShader);
+    }
+}
+
+void GfxRenderingAPIOGL::SetStereoViewProj(const float* vp32) {
+    memcpy(mStereoViewProj, vp32, sizeof(mStereoViewProj));
+}
+
+void GfxRenderingAPIOGL::SetStereoWorldSpace(bool worldSpace) {
+    mStereoWorld = worldSpace;
+}
+
+void GfxRenderingAPIOGL::BindExternalFramebuffer(GLuint fbo, uint32_t width, uint32_t height, bool multiview) {
     if (mExternalFrameBuffer == 0) {
         mExternalFrameBuffer = mFrameBuffers.size();
         mFrameBuffers.resize(mExternalFrameBuffer + 1);
@@ -974,6 +1050,7 @@ void GfxRenderingAPIOGL::BindExternalFramebuffer(GLuint fbo, uint32_t width, uin
 
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     mCurrentFrameBuffer = mExternalFrameBuffer;
+    SetMultiviewTarget(multiview);
 }
 
 void GfxRenderingAPIOGL::ClearCurrentFramebuffer(float r, float g, float b, float a, bool depth) {

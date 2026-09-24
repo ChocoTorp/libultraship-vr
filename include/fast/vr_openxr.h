@@ -170,6 +170,15 @@ bool vr_menu_consumes_button(int hand, uint16_t mask);
 void vr_begin_menu();
 void vr_end_menu();
 
+// QuestShip: single-pass stereo (GL_OVR_multiview2). When vr_is_multiview(), the window loop runs
+// ONE interpreter pass between vr_begin_stereo()/vr_end_stereo() instead of one per eye: the CPU
+// works against a center view (vr_get_current_eye() == 2, union frustum) and emits world-space
+// positions; the GPU applies each eye's view-projection.
+bool vr_is_multiview();
+bool vr_is_stereo_pass();
+void vr_begin_stereo();
+void vr_end_stereo();
+
 // HMD-driven heading (Phase 2)
 int16_t vr_get_heading_yaw();
 void vr_set_lockon_yaw(int16_t yaw_binang, bool active);

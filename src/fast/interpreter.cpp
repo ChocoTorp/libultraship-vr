@@ -189,17 +189,34 @@ static std::shared_ptr<Ship::IResource> CachedLoadResourceProcess(const char* na
     return r;
 }
 
+// Hash-keyed texture resources (G_SETTIMG_OTR_HASH): content-derived keys, no verification needed.
+static std::unordered_map<uint64_t, std::shared_ptr<Ship::IResource>> sProcessByHash;
+
+static std::shared_ptr<Ship::IResource> CachedLoadResourceProcessByHash(uint64_t hash) {
+    auto it = sProcessByHash.find(hash);
+    if (it != sProcessByHash.end()) {
+        return it->second;
+    }
+    auto rm = Ship::Context::GetRawInstance()->GetResourceManager();
+    std::shared_ptr<Ship::IResource> r = rm->LoadResourceProcess(rm->GetArchiveManager()->HashToCString(hash));
+    if (r != nullptr) {
+        sProcessByHash.emplace(hash, r);
+    }
+    return r;
+}
+
 void Interpreter::ClearResourceLookupCache() {
     sRawByName.clear();
     sRawByHash.clear();
     sProcessByName.clear();
+    sProcessByHash.clear();
 }
 
 static void ValidateResourceLookupCache() {
     static uint64_t sGeneration = ~0ull;
     const uint64_t gen = Ship::Context::GetRawInstance()->GetResourceManager()->GetCacheGeneration();
     // Also bound growth: scenes keep adding stable path pointers.
-    if (gen != sGeneration || sRawByName.size() + sRawByHash.size() + sProcessByName.size() > 60000) {
+    if (gen != sGeneration || sRawByName.size() + sRawByHash.size() + sProcessByName.size() + sProcessByHash.size() > 60000) {
         Interpreter::ClearResourceLookupCache();
         sGeneration = gen;
     }
@@ -1672,7 +1689,7 @@ void Interpreter::GfxSpVertex(size_t n_vertices, size_t dest_index, const F3DVtx
                   v->ob[2] * mRsp->MP_matrix[2][3] + mRsp->MP_matrix[3][3];
 
         float world_pos[3] = { 0.0 };
-        if ((mRsp->geometry_mode & G_LIGHTING_POSITIONAL) || vrphys_mesh_collecting()) {
+        if ((mRsp->geometry_mode & G_LIGHTING_POSITIONAL) || vrphys_mesh_collecting() || mStereoPass) {
             float(*mtx)[4] = mRsp->modelview_matrix_stack[mRsp->modelview_matrix_stack_size - 1];
             world_pos[0] = v->ob[0] * mtx[0][0] + v->ob[1] * mtx[1][0] + v->ob[2] * mtx[2][0] + mtx[3][0];
             world_pos[1] = v->ob[0] * mtx[0][1] + v->ob[1] * mtx[1][1] + v->ob[2] * mtx[2][1] + mtx[3][1];
@@ -2181,16 +2198,33 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
 
     struct GfxClipParameters clip_parameters = mRapi->GetClipParameters();
 
+    // QuestShip single-pass stereo: into the multiview eye target, emit WORLD positions and let
+    // the GPU apply each eye's view-projection. 2D rects and offscreen game framebuffers keep
+    // clip-space positions (the clip coords above were computed against the center view).
+    const bool stereoWorld = mStereoPass && !mFbActive && !is_rect;
+    if (stereoWorld != mBufStereoWorld) {
+        Flush();
+        mRapi->SetStereoWorldSpace(stereoWorld);
+        mBufStereoWorld = stereoWorld;
+    }
+
     for (int i = 0; i < 3; i++) {
         float z = v_arr[i]->z, w = v_arr[i]->w;
         if (clip_parameters.z_is_from_0_to_1) {
             z = (z + w) / 2.0f;
         }
 
-        mBufVbo[mBufVboLen++] = v_arr[i]->x;
-        mBufVbo[mBufVboLen++] = clip_parameters.invertY ? -v_arr[i]->y : v_arr[i]->y;
-        mBufVbo[mBufVboLen++] = z;
-        mBufVbo[mBufVboLen++] = w;
+        if (stereoWorld) {
+            mBufVbo[mBufVboLen++] = v_arr[i]->world[0];
+            mBufVbo[mBufVboLen++] = v_arr[i]->world[1];
+            mBufVbo[mBufVboLen++] = v_arr[i]->world[2];
+            mBufVbo[mBufVboLen++] = 1.0f;
+        } else {
+            mBufVbo[mBufVboLen++] = v_arr[i]->x;
+            mBufVbo[mBufVboLen++] = clip_parameters.invertY ? -v_arr[i]->y : v_arr[i]->y;
+            mBufVbo[mBufVboLen++] = z;
+            mBufVbo[mBufVboLen++] = w;
+        }
 
         for (int t = 0; t < 2; t++) {
             if (!usedTextures[t]) {
@@ -4120,9 +4154,8 @@ bool gfx_set_timg_otr_hash_handler_custom(F3DGfx** cmd0) {
         return false;
     }
 
-    std::shared_ptr<Fast::Texture> texture = std::static_pointer_cast<Fast::Texture>(
-        Ship::Context::GetRawInstance()->GetResourceManager()->LoadResourceProcess(
-            Ship::Context::GetRawInstance()->GetResourceManager()->GetArchiveManager()->HashToCString(hash)));
+    std::shared_ptr<Fast::Texture> texture =
+        std::static_pointer_cast<Fast::Texture>(CachedLoadResourceProcessByHash(hash)); // QuestShip
     if (texture != nullptr) {
         texFlags = texture->Flags;
         rawTexMetadata.width = texture->Width;
@@ -5240,6 +5273,9 @@ void Interpreter::RunGuiOnly() {
 void Interpreter::Run(Gfx* commands, const std::unordered_map<Mtx*, MtxF>& mtx_replacements) {
     SpReset();
     ValidateResourceLookupCache(); // QuestShip
+    mStereoPass = vr_is_initialized() && vr_is_stereo_pass();
+    mBufStereoWorld = false;
+    mRapi->SetStereoWorldSpace(false);
 
     mGetPixelDepthPending.clear();
     mGetPixelDepthCached.clear();

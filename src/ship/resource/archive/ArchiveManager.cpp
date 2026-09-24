@@ -48,10 +48,13 @@ std::shared_ptr<File> ArchiveManager::LoadFile(const std::string& filePath) {
 }
 
 std::shared_ptr<File> ArchiveManager::LoadFile(uint64_t hash) {
-    auto archive = mFileToArchive[hash];
-    if (archive == nullptr) {
+    // QuestShip: find(), not operator[] — [] inserts on a miss (every alt-asset probe misses),
+    // which is a map write, unsafe with the parallel texture preloader reading concurrently.
+    auto it = mFileToArchive.find(hash);
+    if (it == mFileToArchive.end() || it->second == nullptr) {
         return nullptr;
     }
+    auto archive = it->second;
 
     return archive->LoadFile(hash);
 }
@@ -65,7 +68,8 @@ bool ArchiveManager::HasFile(uint64_t hash) {
 }
 
 std::shared_ptr<Archive> ArchiveManager::GetArchiveFromFile(const std::string& filePath) {
-    return mFileToArchive[CRC64(filePath.c_str())];
+    auto it = mFileToArchive.find(CRC64(filePath.c_str())); // QuestShip: no insert on miss
+    return it == mFileToArchive.end() ? nullptr : it->second;
 }
 
 std::shared_ptr<std::vector<std::string>> ArchiveManager::ListFiles(const std::string& searchMask) {

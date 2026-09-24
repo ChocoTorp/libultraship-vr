@@ -155,10 +155,12 @@ static struct {
         XrSwapchain handle;
         int64_t format;
         uint32_t width, height;
+        uint32_t array_size; // QuestShip: 2 = single-pass stereo (multiview) swapchain, else 1
 #ifdef VR_GLES
         std::vector<XrSwapchainImageOpenGLESKHR> images;
         std::vector<GLuint> fbos;  // one FBO per swapchain image, color = the XR texture
         GLuint depth_rb;           // shared depth/stencil renderbuffer (only one image is drawn at a time)
+        GLuint depth_array;        // multiview: shared 2-layer depth/stencil texture array
 #else
         std::vector<XrSwapchainImageD3D11KHR> images;
         std::vector<ComPtr<ID3D11RenderTargetView>> rtvs;
@@ -175,8 +177,14 @@ static struct {
     uint32_t current_image_index[2]; // Acquired swapchain image index per eye
 
     // Cached per-frame matrices (row-major, row-vector convention)
-    float projection[2][4][4];
-    float view[2][4][4];
+    // [0]/[1] = eyes, [2] = QuestShip "center" view: eye midpoint with the UNION of both eye
+    // frusta, used by the CPU (clip rejection, culling, fog) in single-pass stereo.
+    float projection[3][4][4];
+    float view[3][4][4];
+    // QuestShip single-pass stereo (GL_OVR_multiview2): one 2-layer eye swapchain, one
+    // interpreter pass, the GPU applies each eye's view-projection.
+    bool multiview;
+    bool stereo_active;
 
     // Configuration
     float world_scale;       // N64 units per meter
@@ -349,8 +357,18 @@ static constexpr int64_t kSwapchainFormatUnorm = DXGI_FORMAT_R8G8B8A8_UNORM;
 static DXGI_FORMAT g_view_format = DXGI_FORMAT_R8G8B8A8_UNORM; // set in vr_init
 #endif
 
-// Create the XR swapchain for sc (width/height/format already set) and a render target per image.
+#ifdef VR_GLES
+typedef void (*PFN_FramebufferTextureMultiviewOVR)(GLenum target, GLenum attachment, GLuint texture, GLint level,
+                                                   GLint baseViewIndex, GLsizei numViews);
+static PFN_FramebufferTextureMultiviewOVR s_glFramebufferTextureMultiviewOVR = nullptr;
+#endif
+
+// Create the XR swapchain for sc (width/height/format/array_size already set) and a render target
+// per image. array_size 2 = a multiview target (both eyes as layers of one texture array).
 static bool vr_create_swapchain(VrSwapchain& sc, const char* label) {
+    if (sc.array_size == 0) {
+        sc.array_size = 1;
+    }
     XrSwapchainCreateInfo swapchain_ci = { XR_TYPE_SWAPCHAIN_CREATE_INFO };
     swapchain_ci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
     swapchain_ci.format = sc.format;
@@ -358,7 +376,7 @@ static bool vr_create_swapchain(VrSwapchain& sc, const char* label) {
     swapchain_ci.width = sc.width;
     swapchain_ci.height = sc.height;
     swapchain_ci.faceCount = 1;
-    swapchain_ci.arraySize = 1;
+    swapchain_ci.arraySize = sc.array_size;
     swapchain_ci.mipCount = 1;
 
     if (!xr_check(xrCreateSwapchain(xr.session, &swapchain_ci, &sc.handle), "xrCreateSwapchain")) {
@@ -377,18 +395,31 @@ static bool vr_create_swapchain(VrSwapchain& sc, const char* label) {
                                reinterpret_cast<XrSwapchainImageBaseHeader*>(sc.images.data()));
 
 #ifdef VR_GLES
-    glGenRenderbuffers(1, &sc.depth_rb);
-    glBindRenderbuffer(GL_RENDERBUFFER, sc.depth_rb);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, sc.width, sc.height);
-    glBindRenderbuffer(GL_RENDERBUFFER, 0);
+    const bool multiview = sc.array_size == 2 && s_glFramebufferTextureMultiviewOVR != nullptr;
+    if (multiview) {
+        glGenTextures(1, &sc.depth_array);
+        glBindTexture(GL_TEXTURE_2D_ARRAY, sc.depth_array);
+        glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_DEPTH24_STENCIL8, sc.width, sc.height, 2);
+        glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+    } else {
+        glGenRenderbuffers(1, &sc.depth_rb);
+        glBindRenderbuffer(GL_RENDERBUFFER, sc.depth_rb);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, sc.width, sc.height);
+        glBindRenderbuffer(GL_RENDERBUFFER, 0);
+    }
 
     sc.fbos.resize(image_count);
     glGenFramebuffers(image_count, sc.fbos.data());
     bool ok = true;
     for (uint32_t i = 0; i < image_count; i++) {
         glBindFramebuffer(GL_FRAMEBUFFER, sc.fbos[i]);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, sc.images[i].image, 0);
-        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, sc.depth_rb);
+        if (multiview) {
+            s_glFramebufferTextureMultiviewOVR(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, sc.images[i].image, 0, 0, 2);
+            s_glFramebufferTextureMultiviewOVR(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, sc.depth_array, 0, 0, 2);
+        } else {
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, sc.images[i].image, 0);
+            glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, sc.depth_rb);
+        }
         const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
         if (status != GL_FRAMEBUFFER_COMPLETE) {
             spdlog::error("[VR] {} swapchain image {} FBO incomplete: 0x{:x}", label, i, status);
@@ -461,6 +492,10 @@ static void vr_destroy_swapchain(VrSwapchain& sc) {
         glDeleteRenderbuffers(1, &sc.depth_rb);
         sc.depth_rb = 0;
     }
+    if (sc.depth_array != 0) {
+        glDeleteTextures(1, &sc.depth_array);
+        sc.depth_array = 0;
+    }
 #else
     sc.rtvs.clear();
     sc.dsvs.clear();
@@ -476,7 +511,7 @@ static void vr_destroy_swapchain(VrSwapchain& sc) {
 // Make swapchain image `idx` the backend's current render target.
 static void vr_bind_target(VrSwapchain& sc, uint32_t idx) {
 #ifdef VR_GLES
-    xr.ogl->BindExternalFramebuffer(sc.fbos[idx], sc.width, sc.height);
+    xr.ogl->BindExternalFramebuffer(sc.fbos[idx], sc.width, sc.height, sc.array_size == 2);
 #else
     ID3D11RenderTargetView* rtv = sc.rtvs[idx].Get();
     ID3D11DepthStencilView* dsv = sc.dsvs[idx].Get();
@@ -1302,8 +1337,23 @@ bool vr_init() {
                  (int)view_format);
 #endif
 
-    // --- Create Swapchains (one per eye) ---
-    for (uint32_t eye = 0; eye < 2; eye++) {
+    // --- QuestShip: single-pass stereo (GL_OVR_multiview2) if available ---
+    xr.multiview = false;
+#ifdef VR_GLES
+    {
+        const char* gl_ext = reinterpret_cast<const char*>(glGetString(GL_EXTENSIONS));
+        s_glFramebufferTextureMultiviewOVR =
+            reinterpret_cast<PFN_FramebufferTextureMultiviewOVR>(eglGetProcAddress("glFramebufferTextureMultiviewOVR"));
+        xr.multiview = CVarGetInteger("gVrMultiview", 1) && gl_ext && strstr(gl_ext, "GL_OVR_multiview2") &&
+                       s_glFramebufferTextureMultiviewOVR != nullptr &&
+                       xr.config_views[0].recommendedImageRectWidth == xr.config_views[1].recommendedImageRectWidth &&
+                       xr.config_views[0].recommendedImageRectHeight == xr.config_views[1].recommendedImageRectHeight;
+        spdlog::info("[VR] Single-pass stereo (multiview): {}", xr.multiview ? "ON" : "off");
+    }
+#endif
+
+    // --- Create Swapchains (one per eye, or ONE 2-layer swapchain for multiview) ---
+    for (uint32_t eye = 0; eye < (xr.multiview ? 1u : 2u); eye++) {
         auto& sc = xr.eye_swapchains[eye];
 
         // Apply the resolution multiplier, then clamp to what the runtime allows.
@@ -1317,12 +1367,13 @@ bool vr_init() {
         sc.width = scaled_w;
         sc.height = scaled_h;
         sc.format = chosen_format;
+        sc.array_size = xr.multiview ? 2 : 1;
 
         spdlog::info("[VR] Eye {} render resolution: {}x{} (recommended {}x{}, scale {:.2f})", eye, sc.width, sc.height,
                      xr.config_views[eye].recommendedImageRectWidth, xr.config_views[eye].recommendedImageRectHeight,
                      xr.resolution_scale);
 
-        if (!vr_create_swapchain(sc, eye == 0 ? "Eye 0" : "Eye 1")) {
+        if (!vr_create_swapchain(sc, xr.multiview ? "Stereo (multiview)" : (eye == 0 ? "Eye 0" : "Eye 1"))) {
             vr_shutdown();
             return false;
         }
@@ -1977,6 +2028,22 @@ bool vr_begin_frame() {
         build_projection_matrix(xr.views[eye].fov, xr.near_clip, xr.far_clip, xr.projection[eye]);
         pose_to_view_matrix(xr.views[eye].pose, xr.world_scale, xr.view[eye]);
     }
+    // QuestShip: center view for single-pass stereo CPU work — eye midpoint, left-eye orientation
+    // (both eyes share it on Quest), and a frustum that is the UNION of both eyes' so nothing
+    // visible to either eye is rejected.
+    {
+        XrPosef cp = xr.views[0].pose;
+        cp.position = { 0.5f * (xr.views[0].pose.position.x + xr.views[1].pose.position.x),
+                        0.5f * (xr.views[0].pose.position.y + xr.views[1].pose.position.y),
+                        0.5f * (xr.views[0].pose.position.z + xr.views[1].pose.position.z) };
+        XrFovf uf;
+        uf.angleLeft = fminf(xr.views[0].fov.angleLeft, xr.views[1].fov.angleLeft);
+        uf.angleRight = fmaxf(xr.views[0].fov.angleRight, xr.views[1].fov.angleRight);
+        uf.angleUp = fmaxf(xr.views[0].fov.angleUp, xr.views[1].fov.angleUp);
+        uf.angleDown = fminf(xr.views[0].fov.angleDown, xr.views[1].fov.angleDown);
+        build_projection_matrix(uf, xr.near_clip, xr.far_clip, xr.projection[2]);
+        pose_to_view_matrix(cp, xr.world_scale, xr.view[2]);
+    }
 
     return true;
 }
@@ -1992,13 +2059,12 @@ void vr_end_frame() {
         // against where the player's head actually is, or the compositor would fight the snap turn.
         projection_views[eye].pose = xr.submit_pose[eye];
         projection_views[eye].fov = xr.submit_fov[eye];
-        projection_views[eye].subImage.swapchain = xr.eye_swapchains[eye].handle;
+        const auto& subSc = xr.eye_swapchains[xr.multiview ? 0 : eye];
+        projection_views[eye].subImage.swapchain = subSc.handle;
         projection_views[eye].subImage.imageRect.offset = { 0, 0 };
-        projection_views[eye].subImage.imageRect.extent = {
-            static_cast<int32_t>(xr.eye_swapchains[eye].width),
-            static_cast<int32_t>(xr.eye_swapchains[eye].height)
-        };
-        projection_views[eye].subImage.imageArrayIndex = 0;
+        projection_views[eye].subImage.imageRect.extent = { static_cast<int32_t>(subSc.width),
+                                                             static_cast<int32_t>(subSc.height) };
+        projection_views[eye].subImage.imageArrayIndex = xr.multiview ? eye : 0;
     }
 
     XrCompositionLayerProjection projection_layer = { XR_TYPE_COMPOSITION_LAYER_PROJECTION };
@@ -2155,6 +2221,47 @@ void vr_begin_eye(int eye) {
 
     const float clear_color[] = { 0.0f, 0.0f, 0.0f, 1.0f };
     xr.current_image_index[eye] = vr_acquire_and_bind(xr.eye_swapchains[eye], clear_color, "Eye swapchain image");
+}
+
+// QuestShip: single-pass stereo. One acquire of the 2-layer swapchain, one interpreter pass; the
+// GL backend gets both eyes' view-projections for the multiview vertex shader.
+bool vr_is_multiview() {
+    return xr.initialized && xr.multiview;
+}
+
+bool vr_is_stereo_pass() {
+    return xr.stereo_active;
+}
+
+void vr_begin_stereo() {
+    if (!xr.initialized || !xr.multiview) return;
+    xr.current_eye = 2; // the CPU uses the center view
+    xr.stereo_active = true;
+    xr.eyes_ever_rendered = true;
+#ifdef VR_GLES
+    float vp[2][4][4];
+    for (int eye = 0; eye < 2; eye++) {
+        float v[4][4];
+        vr_get_view_matrix(eye, v);
+        for (int r = 0; r < 4; r++)
+            for (int c = 0; c < 4; c++) {
+                float acc = 0.0f;
+                for (int k = 0; k < 4; k++) acc += v[r][k] * xr.projection[eye][k][c];
+                vp[eye][r][c] = acc;
+            }
+    }
+    xr.ogl->SetStereoViewProj(&vp[0][0][0]);
+#endif
+    const float clear_color[] = { 0.0f, 0.0f, 0.0f, 1.0f };
+    xr.current_image_index[0] = vr_acquire_and_bind(xr.eye_swapchains[0], clear_color, "Stereo swapchain image");
+}
+
+void vr_end_stereo() {
+    if (!xr.initialized || !xr.stereo_active) return;
+    xr.stereo_active = false;
+    xr.current_eye = 0;
+    XrSwapchainImageReleaseInfo release_info = { XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
+    xr_check(xrReleaseSwapchainImage(xr.eye_swapchains[0].handle, &release_info), "xrReleaseSwapchainImage (stereo)");
 }
 
 void vr_end_eye(int eye) {
@@ -2983,7 +3090,8 @@ void vr_rebind_current_eye_target() {
     } else if (xr.rendering_hud) {
         vr_bind_target(xr.hud_swapchain, xr.hud_image_index);
     } else {
-        vr_bind_target(xr.eye_swapchains[xr.current_eye], xr.current_image_index[xr.current_eye]);
+        const int e = xr.stereo_active ? 0 : xr.current_eye;
+        vr_bind_target(xr.eye_swapchains[e], xr.current_image_index[e]);
     }
 }
 
@@ -3208,6 +3316,10 @@ bool vr_take_start_tap() { return false; }
 bool vr_menu_consumes_button(int, uint16_t) { return false; }
 void vr_begin_menu() {}
 void vr_end_menu() {}
+bool vr_is_multiview() { return false; }
+bool vr_is_stereo_pass() { return false; }
+void vr_begin_stereo() {}
+void vr_end_stereo() {}
 bool vr_lookup_hand_matrix(const void*, float out[4][4]) {
     for (int r = 0; r < 4; r++)
         for (int c = 0; c < 4; c++)

@@ -18,14 +18,59 @@ OtrArchive::~OtrArchive() {
     SPDLOG_TRACE("destruct otrarchive: {}", GetPath());
 }
 
+static constexpr size_t kMaxMpqHandles = 4; // QuestShip: parallel readers per archive
+
+HANDLE OtrArchive::AcquireHandle() {
+    std::unique_lock<std::mutex> lock(mPoolMutex);
+    for (;;) {
+        if (!mFreeHandles.empty()) {
+            HANDLE h = mFreeHandles.back();
+            mFreeHandles.pop_back();
+            return h;
+        }
+        if (mAllHandles.size() < kMaxMpqHandles) {
+            HANDLE h = nullptr;
+            if (SFileOpenArchive(GetPath().c_str(), 0, MPQ_OPEN_READ_ONLY, &h)) {
+                mAllHandles.push_back(h);
+                return h;
+            }
+            if (mAllHandles.empty()) {
+                return nullptr;
+            }
+            // Couldn't open another; wait for one to come back.
+        }
+        mPoolCv.wait(lock, [this] { return !mFreeHandles.empty(); });
+    }
+}
+
+void OtrArchive::ReleaseHandle(HANDLE handle) {
+    {
+        std::lock_guard<std::mutex> lock(mPoolMutex);
+        mFreeHandles.push_back(handle);
+    }
+    mPoolCv.notify_one();
+}
+
 std::shared_ptr<File> OtrArchive::LoadFile(const std::string& filePath) {
     if (mHandle == nullptr) {
         SPDLOG_TRACE("Failed to open file {} from mpq archive {}. Archive not open.", filePath, GetPath());
         return nullptr;
     }
 
+    HANDLE archive = AcquireHandle();
+    if (archive == nullptr) {
+        return nullptr;
+    }
+    struct HandleReturn {
+        OtrArchive* self;
+        HANDLE h;
+        ~HandleReturn() {
+            self->ReleaseHandle(h);
+        }
+    } handleReturn{ this, archive };
+
     HANDLE fileHandle;
-    bool attempt = SFileOpenFileEx(mHandle, filePath.c_str(), 0, &fileHandle);
+    bool attempt = SFileOpenFileEx(archive, filePath.c_str(), 0, &fileHandle);
     if (!attempt) {
         SPDLOG_TRACE("({}) Failed to open file {} from mpq archive  {}.", GetLastError(), filePath, GetPath());
         return nullptr;
@@ -71,6 +116,9 @@ bool OtrArchive::Open() {
     const bool opened = SFileOpenArchive(GetPath().c_str(), 0, MPQ_OPEN_READ_ONLY, &mHandle);
     if (opened) {
         SPDLOG_INFO("Opened mpq file \"{}\"", GetPath());
+        std::lock_guard<std::mutex> lock(mPoolMutex);
+        mAllHandles.push_back(mHandle);
+        mFreeHandles.push_back(mHandle);
     } else {
         SPDLOG_ERROR("Failed to load mpq file \"{}\"", GetPath());
         mHandle = nullptr;
@@ -97,11 +145,17 @@ bool OtrArchive::Open() {
 }
 
 bool OtrArchive::Close() {
-    bool closed = SFileCloseArchive(mHandle);
-    if (!closed) {
-        SPDLOG_ERROR("({}) Failed to close mpq {}", GetLastError(), mHandle);
+    bool closed = true;
+    std::lock_guard<std::mutex> lock(mPoolMutex);
+    for (HANDLE h : mAllHandles) {
+        if (!SFileCloseArchive(h)) {
+            SPDLOG_ERROR("({}) Failed to close mpq {}", GetLastError(), h);
+            closed = false;
+        }
     }
-
+    mAllHandles.clear();
+    mFreeHandles.clear();
+    mHandle = nullptr;
     return closed;
 }
 

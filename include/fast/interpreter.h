@@ -534,6 +534,9 @@ class Interpreter {
     uintptr_t mSegmentPointers[MAX_SEGMENT_POINTERS]{};
 
     bool mFbActive{};
+    // QuestShip single-pass stereo: this Run() renders both eyes at once (world-space positions)
+    bool mStereoPass{};
+    bool mBufStereoWorld{}; // positions in the pending vertex batch are world-space
     bool mRendersToFb{}; // game_renders_to_framebuffer;
     std::map<int, FBInfo>::iterator mActiveFrameBuffer;
     std::map<int, FBInfo> mFrameBuffers;
