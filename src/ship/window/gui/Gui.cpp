@@ -15,6 +15,11 @@
 #include "ship/window/gui/Fonts.h"
 #include "ship/window/gui/resource/GuiTextureFactory.h"
 #include "ship/window/gui/resource/GuiTexture.h"
+#if defined(__ANDROID__) || defined(__IOS__)
+#include "ship/port/mobile/MobileImpl.h"
+#include <imgui_impl_sdl2.h>
+#include <SDL2/SDL.h>
+#endif
 
 namespace Ship {
 #define TOGGLE_BTN ImGuiKey_F1
