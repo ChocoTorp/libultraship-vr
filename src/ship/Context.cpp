@@ -31,6 +31,17 @@
 namespace Ship {
 std::unique_ptr<Context> Context::mContext;
 
+#ifdef __ANDROID__
+// QuestShip: data root settable from Java (was hard-coded /storage/emulated/0/SOH)
+static std::string sAndroidDataRootPath = "/storage/emulated/0/SOHVR";
+
+void Context::SetAndroidDataRootPath(const std::string& path) {
+    if (!path.empty()) {
+        sAndroidDataRootPath = path;
+    }
+}
+#endif
+
 Context* Context::GetRawInstance() {
     return mContext.get();
 }
@@ -459,10 +470,7 @@ std::string Context::GetShortName() const {
 
 std::string Context::GetAppBundlePath() {
 #if defined(__ANDROID__)
-    const char* externaldir = "/storage/emulated/0/SOH";
-    if (externaldir != NULL) {
-        return externaldir;
-    }
+    return sAndroidDataRootPath;
 #endif
 
 #ifdef __IOS__
@@ -522,10 +530,7 @@ std::string Context::GetAppBundlePath() {
 
 std::string Context::GetAppDirectoryPath(const std::string& appName) {
 #if defined(__ANDROID__)
-    const char* externaldir = "/storage/emulated/0/SOH";
-    if (externaldir != NULL) {
-        return externaldir;
-    }
+    return sAndroidDataRootPath;
 #endif
 
 #ifdef __IOS__

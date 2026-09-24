@@ -125,6 +125,9 @@ class Context {
      * @return Absolute path to the first match found, or an empty string if not found.
      */
     static std::string LocateFileAcrossAppDirs(const std::string& path, const std::string& appName = "");
+#if defined(__ANDROID__)
+    static void SetAndroidDataRootPath(const std::string& path);
+#endif
 
     /**
      * @brief Constructs a Context with the given identifiers but does not initialize subsystems.
