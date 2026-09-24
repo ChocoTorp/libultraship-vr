@@ -5408,6 +5408,12 @@ void gfx_push_current_dir(char* path) {
 
 int32_t gfx_check_image_signature(const char* imgData) {
     uintptr_t i = (uintptr_t)(imgData);
+#if defined(__aarch64__) && defined(__ANDROID__)
+    // Android tags heap pointers in the top byte (e.g. 0xB4...; ARM64 Top-Byte-Ignore makes them
+    // valid to dereference). Strip the tag so the range filter below doesn't reject real heap strings
+    // like the font buffer's resource paths (which then render as noise).
+    i &= 0x00FFFFFFFFFFFFFFull;
+#endif
 
     if ((i & 1) == 1) {
         return 0;
