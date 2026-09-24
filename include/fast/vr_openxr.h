@@ -139,6 +139,37 @@ void vr_register_hand_child_matrix(const void* mtx, int hand, const float* local
 void vr_clear_hand_matrices();
 bool vr_lookup_hand_matrix(const void* mtx, float out[4][4]);
 
+// QuestShip: PHYSICAL-space queries (raw tracking space, meters). Stick locomotion and artificial
+// (snap/smooth) turning never move these; only the player's real body does. For gestures that
+// must not be triggered by moving through the game world (item selector flicks).
+bool vr_get_hand_position_physical(int hand, float out_m[3]);
+// Head right vector, flattened to the horizontal plane and normalized (physical space).
+bool vr_get_head_right_physical(float out[3]);
+// Head position + forward flattened to the horizontal plane (physical space).
+bool vr_get_head_pose_physical(float pos_m[3], float fwd_flat[3]);
+// Physical-space point -> game-world position, with the live (render-rate) anchor and turn.
+void vr_physical_to_world(const float in_m[3], float out[3]);
+// Space-locked matrix: substituted per eye with
+//   T(world of anchor_m) * R(artificial turn) * T(offset_units, physical axes) * RotY(spin) * model
+// so geometry pinned to a physical spot tracks at headset rate (no 20 Hz stepping) and can spin
+// smoothly. model_mf16 = rotation/scale only (MtxF layout). Cleared with vr_clear_hand_matrices.
+void vr_register_space_matrix(const void* mtx, const float anchor_m[3], const float offset_units[3],
+                              const float* model_mf16, float spin_deg_per_s);
+
+// QuestShip: in-headset settings menu. Hold the LEFT menu button to toggle it; a quick tap is
+// delivered to the game as START on release (vr_take_start_tap). While open, the right (or left)
+// aim ray is a laser pointer on the panel and the menu owns every controller input.
+bool vr_menu_is_open();
+void vr_menu_set_open(bool open);
+bool vr_is_rendering_menu();
+void vr_menu_get_size(uint32_t* w, uint32_t* h);
+// Pointer in panel pixels; false when no ray hits the panel (down/wheel still reported).
+bool vr_menu_pointer(float* x, float* y, bool* down, float* wheel);
+bool vr_take_start_tap();
+bool vr_menu_consumes_button(int hand, uint16_t mask);
+void vr_begin_menu();
+void vr_end_menu();
+
 // HMD-driven heading (Phase 2)
 int16_t vr_get_heading_yaw();
 void vr_set_lockon_yaw(int16_t yaw_binang, bool active);

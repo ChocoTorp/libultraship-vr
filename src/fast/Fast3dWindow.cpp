@@ -317,6 +317,32 @@ bool Fast3dWindow::DrawAndRunGraphicsCommands(Gfx* commands, const std::unordere
                 hudMs = elapsedMsSince(hudStart);
             }
 
+#ifdef __ANDROID__
+            // QuestShip: in-headset settings menu. Keep the ImGui menu's visibility in step with
+            // the VR toggle (hold left menu button), in both directions: closing it with its own
+            // X button closes the panel too.
+            {
+                static bool sLastMenuVisible = false;
+                bool visible = gui->GetMenuOrMenubarVisible();
+                if (visible != sLastMenuVisible) {
+                    vr_menu_set_open(visible);
+                } else if (vr_menu_is_open() != visible) {
+                    if (gui->GetMenu()) {
+                        gui->GetMenu()->ToggleVisibility();
+                    } else if (gui->GetMenuBar()) {
+                        gui->GetMenuBar()->ToggleVisibility();
+                    }
+                    visible = gui->GetMenuOrMenubarVisible();
+                }
+                sLastMenuVisible = visible;
+                if (vr_menu_is_open()) {
+                    vr_begin_menu();
+                    gui->StartDraw();
+                    gui->EndDraw();
+                    vr_end_menu();
+                }
+            }
+#endif
             vr_end_frame();
         }
 

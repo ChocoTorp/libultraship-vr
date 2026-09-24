@@ -15,6 +15,8 @@
 #include "ship/window/gui/Fonts.h"
 #include "ship/window/gui/resource/GuiTextureFactory.h"
 #include "ship/window/gui/resource/GuiTexture.h"
+#include "fast/vr_openxr.h"
+#include <cfloat>
 #if defined(__ANDROID__) || defined(__IOS__)
 #include "ship/port/mobile/MobileImpl.h"
 #include <imgui_impl_sdl2.h>
@@ -322,6 +324,27 @@ void Gui::StartFrame() {
     // ImGui_ImplSDL2_NewFrame clears HasGamepad (virtual joystick has no controller db entry).
     // Restore it so NavUpdate accepts InjectMenuNavKeys() events.
     mImGuiIo->BackendFlags |= ImGuiBackendFlags_HasGamepad;
+    // QuestShip: rendering onto the in-headset menu panel. The panel, not the SDL window, is the
+    // display, and the VR laser pointer is the mouse.
+    if (vr_is_rendering_menu()) {
+        uint32_t w, h;
+        vr_menu_get_size(&w, &h);
+        mImGuiIo->DisplaySize = ImVec2((float)w, (float)h);
+        mImGuiIo->DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
+        float px, py, wheel;
+        bool down;
+        mImGuiIo->AddMouseSourceEvent(ImGuiMouseSource_Mouse);
+        if (vr_menu_pointer(&px, &py, &down, &wheel)) {
+            mImGuiIo->AddMousePosEvent(px, py);
+        } else {
+            mImGuiIo->AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+        }
+        mImGuiIo->AddMouseButtonEvent(ImGuiMouseButton_Left, down);
+        if (wheel != 0.0f) {
+            mImGuiIo->AddMouseWheelEvent(0.0f, wheel);
+        }
+        mImGuiIo->MouseDrawCursor = true;
+    }
 #endif
     ImGui::NewFrame();
 }

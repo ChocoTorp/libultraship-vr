@@ -279,6 +279,19 @@ void     VR_RegisterHandMatrix(const void* mtx, int hand);
 // (live hand pose) x (localMf16, MtxF layout), so it stays welded to the live-rendered hand.
 void     VR_RegisterHandChildMatrix(const void* mtx, int hand, const float* localMf16);
 void     VR_ClearHandMatrices(void);
+// QuestShip: physical-space (raw tracking, meters) queries and space-locked matrices; see
+// vr_openxr.h. Unaffected by stick locomotion and artificial turning.
+bool     VR_GetHandPositionPhysical(int hand, float outM[3]);
+bool     VR_GetHeadRightPhysical(float out[3]);
+bool     VR_GetHeadPosePhysical(float posM[3], float fwdFlat[3]);
+void     VR_PhysicalToWorld(const float inM[3], float out[3]);
+void     VR_RegisterSpaceMatrix(const void* mtx, const float anchorM[3], const float offsetUnits[3],
+                                const float* modelMf16, float spinDegPerS);
+// QuestShip: in-headset settings menu (hold left menu button). padmgr skips every VR input the
+// menu consumes and emits START once per quick tap of the left menu button.
+bool     VR_MenuIsOpen(void);
+bool     VR_MenuConsumesButton(int hand, uint16_t mask);
+bool     VR_TakeStartTap(void);
 
 #ifdef __cplusplus
 }

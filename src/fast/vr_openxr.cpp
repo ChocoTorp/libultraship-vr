@@ -228,6 +228,26 @@ static struct {
     // the frustum it was actually drawn with.
     XrPosef submit_pose[2];
     XrFovf submit_fov[2];
+    // QuestShip: this frame's head pose in RAW tracking space (pre-turn), for physical-space gestures.
+    XrPosef head_raw;
+    bool head_raw_valid;
+    XrPosef aim_pose_raw[2]; // pre-turn aim poses (menu laser pointer vs. the local_space menu quad)
+
+    // QuestShip: in-headset settings menu (ImGui on its own quad). The left menu button toggles
+    // it. Right (or left) aim ray is a laser pointer: trigger = click, thumbstick Y = scroll.
+    struct EyeSwapchain menu_swapchain;
+    uint32_t menu_image_index;
+    bool menu_open;
+    bool menu_ever_rendered;
+    bool rendering_menu;
+    XrPosef menu_pose; // local_space (raw), +Z faces the player
+    bool menu_btn_prev;
+    bool menu_btn_used; // this press already toggled the menu (long hold)
+    std::chrono::steady_clock::time_point menu_btn_down_at;
+    bool start_tap_pending;
+    bool ptr_hit;
+    bool ptr_down;
+    float ptr_x, ptr_y, ptr_wheel;
 
     // Frame plan for the current XR frame (see vr_set_frame_plan).
     bool plan_render_eyes;
@@ -1369,6 +1389,15 @@ bool vr_init() {
         return false;
     }
 
+    // --- QuestShip: settings-menu swapchain (ImGui panel, 4:3) ---
+    xr.menu_swapchain.width = 1280;
+    xr.menu_swapchain.height = 960;
+    xr.menu_swapchain.format = chosen_format;
+    if (!vr_create_swapchain(xr.menu_swapchain, "Menu")) {
+        vr_shutdown();
+        return false;
+    }
+
     // Initialize views
     xr.views[0] = { XR_TYPE_VIEW };
     xr.views[1] = { XR_TYPE_VIEW };
@@ -1389,6 +1418,9 @@ void vr_shutdown() {
     }
     vr_destroy_swapchain(xr.hud_swapchain);
     vr_destroy_swapchain(xr.screen_swapchain);
+    vr_destroy_swapchain(xr.menu_swapchain);
+    xr.menu_open = false;
+    xr.menu_ever_rendered = false;
     xr.eyes_ever_rendered = false;
     xr.flat_screen = false;
     xr.flat_screen_prev = false;
@@ -1492,6 +1524,152 @@ void vr_get_frame_stats(VrFrameStats* out) {
     if (out != nullptr) {
         *out = g_stats;
     }
+}
+
+// --------------------------------------------------------------------------
+// QuestShip: in-headset settings menu
+// --------------------------------------------------------------------------
+
+static float vr_menu_width_m() {
+    return fmaxf(CVarGetFloat("gVrMenuSize", 1.6f), 0.4f);
+}
+
+void vr_menu_set_open(bool open) {
+    if (open == xr.menu_open) {
+        return;
+    }
+    xr.menu_open = open;
+    if (open && xr.head_raw_valid) {
+        // Drop the panel in front of the player's current gaze, yaw-only, facing them (same
+        // placement as the flat-screen panel, a bit closer so the laser is easy to aim).
+        const XrPosef& hp = xr.head_raw;
+        const glm::quat ho(hp.orientation.w, hp.orientation.x, hp.orientation.y, hp.orientation.z);
+        glm::vec3 fwd = ho * glm::vec3(0.0f, 0.0f, -1.0f);
+        fwd.y = 0.0f;
+        const float len = glm::length(fwd);
+        fwd = (len > 1e-4f) ? fwd / len : glm::vec3(0.0f, 0.0f, -1.0f);
+        const float dist = fmaxf(CVarGetFloat("gVrMenuDistance", 1.3f), 0.4f);
+        const glm::vec3 pos = glm::vec3(hp.position.x, hp.position.y - 0.1f, hp.position.z) + fwd * dist;
+        const glm::quat q = glm::angleAxis(atan2f(-fwd.x, -fwd.z), glm::vec3(0.0f, 1.0f, 0.0f));
+        xr.menu_pose.position = { pos.x, pos.y, pos.z };
+        xr.menu_pose.orientation = { q.x, q.y, q.z, q.w };
+    }
+    xr.ptr_hit = xr.ptr_down = false;
+    xr.ptr_wheel = 0.0f;
+}
+
+static void vr_menu_update() {
+    if (!xr.input_initialized) {
+        return;
+    }
+    // Left menu button (hamburger) toggles the settings menu on every press. It never reaches
+    // the game; pause lives on its own input (see padmgr).
+    const bool btn = (xr.buttons[0] & (1 << 5)) != 0; // VR_BTN_MENU, left controller
+    if (btn && !xr.menu_btn_prev) {
+        vr_menu_set_open(!xr.menu_open);
+        vr_trigger_haptic(0, 0.5f, 0.0f, 40.0f);
+    }
+    xr.menu_btn_prev = btn;
+
+    xr.ptr_hit = false;
+    xr.ptr_down = false;
+    xr.ptr_wheel = 0.0f;
+    if (!xr.menu_open) {
+        return;
+    }
+    const glm::vec3 c(xr.menu_pose.position.x, xr.menu_pose.position.y, xr.menu_pose.position.z);
+    const glm::quat qm(xr.menu_pose.orientation.w, xr.menu_pose.orientation.x, xr.menu_pose.orientation.y,
+                       xr.menu_pose.orientation.z);
+    const glm::vec3 n = qm * glm::vec3(0.0f, 0.0f, 1.0f);
+    const float w = vr_menu_width_m();
+    const float h = w * 0.75f;
+    const int hands[2] = { 1, 0 }; // prefer the right hand
+    for (int i = 0; i < 2; i++) {
+        const int hd = hands[i];
+        if (!xr.hand_active[hd]) {
+            continue;
+        }
+        const XrPosef& ap = xr.aim_pose_raw[hd];
+        const glm::vec3 o(ap.position.x, ap.position.y, ap.position.z);
+        const glm::vec3 d = glm::quat(ap.orientation.w, ap.orientation.x, ap.orientation.y, ap.orientation.z) *
+                            glm::vec3(0.0f, 0.0f, -1.0f);
+        const float denom = glm::dot(d, n);
+        if (denom > -1e-4f) {
+            continue; // parallel or pointing away from the panel's front
+        }
+        const float t = glm::dot(c - o, n) / denom;
+        if (t < 0.0f) {
+            continue;
+        }
+        const glm::vec3 local = glm::conjugate(qm) * (o + d * t - c);
+        const float u = local.x / w + 0.5f;
+        const float v = 0.5f - local.y / h;
+        if (u < 0.0f || u > 1.0f || v < 0.0f || v > 1.0f) {
+            continue;
+        }
+        xr.ptr_hit = true;
+        xr.ptr_x = u * (float)xr.menu_swapchain.width;
+        xr.ptr_y = v * (float)xr.menu_swapchain.height;
+        xr.ptr_down = xr.trigger_value[hd] > 0.55f;
+        const float sy = xr.thumbstick_y[hd];
+        if (fabsf(sy) > 0.2f) {
+            xr.ptr_wheel = sy * 0.2f;
+        }
+        break;
+    }
+}
+
+bool vr_menu_is_open() {
+    return xr.initialized && xr.enabled && xr.menu_open;
+}
+
+bool vr_is_rendering_menu() {
+    return xr.rendering_menu;
+}
+
+void vr_menu_get_size(uint32_t* w, uint32_t* h) {
+    *w = xr.menu_swapchain.width;
+    *h = xr.menu_swapchain.height;
+}
+
+bool vr_menu_pointer(float* x, float* y, bool* down, float* wheel) {
+    *x = xr.ptr_x;
+    *y = xr.ptr_y;
+    *down = xr.ptr_down;
+    *wheel = xr.ptr_wheel;
+    return xr.ptr_hit;
+}
+
+bool vr_take_start_tap() {
+    const bool t = xr.start_tap_pending;
+    xr.start_tap_pending = false;
+    return t;
+}
+
+bool vr_menu_consumes_button(int hand, uint16_t mask) {
+    if (!xr.initialized || !xr.enabled) {
+        return false;
+    }
+    if (xr.menu_open) {
+        return true; // the menu owns every controller input while it is up
+    }
+    return hand == 0 && (mask & (1 << 5)) != 0; // left menu button belongs to the settings menu
+}
+
+void vr_begin_menu() {
+    if (!xr.initialized || !xr.frame_began) return;
+    xr.rendering_menu = true;
+    xr.menu_ever_rendered = true;
+    const float clear_color[] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    xr.menu_image_index = vr_acquire_and_bind(xr.menu_swapchain, clear_color, "Menu swapchain image");
+}
+
+void vr_end_menu() {
+    if (!xr.rendering_menu) return;
+    xr.rendering_menu = false;
+    XrSwapchainImageReleaseInfo release_info = { XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
+    xr_check(xrReleaseSwapchainImage(xr.menu_swapchain.handle, &release_info), "xrReleaseSwapchainImage (menu)");
+    vr_restore_eye_dimensions();
 }
 
 bool vr_begin_frame() {
@@ -1631,7 +1809,8 @@ bool vr_begin_frame() {
     // the same head-pivot turn accumulation, so the physics sim and every game-facing pose
     // compose identically. Suspended in flat-screen mode (right stick navigates menus) and in
     // third person (the stock game owns the camera and the right stick is pure C-buttons).
-    if (xr.input_initialized && !xr.flat_screen && xr.first_person && CVarGetInteger("gVrSnapTurnOn", 1)) {
+    if (xr.input_initialized && !xr.flat_screen && !xr.menu_open && xr.first_person &&
+        CVarGetInteger("gVrSnapTurnOn", 1)) {
         static int snap_latch = 0;
         const float sx = xr.thumbstick_x[1];
         if (CVarGetInteger("gVrTurnStyle", 0) == 1) {
@@ -1732,6 +1911,11 @@ bool vr_begin_frame() {
     // last world frame described by the frustum it was rendered from, so the compositor reprojects
     // it correctly instead of stretching it onto a pose it never matched.
     const bool refresh_submit = !xr.flat_screen && xr.plan_render_eyes;
+    xr.head_raw.position = { 0.5f * (xr.views[0].pose.position.x + xr.views[1].pose.position.x),
+                             0.5f * (xr.views[0].pose.position.y + xr.views[1].pose.position.y),
+                             0.5f * (xr.views[0].pose.position.z + xr.views[1].pose.position.z) };
+    xr.head_raw.orientation = xr.views[0].pose.orientation;
+    xr.head_raw_valid = true;
     for (int eye = 0; eye < 2; eye++) {
         if (refresh_submit || !xr.eyes_ever_rendered) {
             xr.submit_pose[eye] = xr.views[eye].pose;
@@ -1744,10 +1928,13 @@ bool vr_begin_frame() {
             // Keep the RAW tracking-space grip for compositor quads (hand-attached HUD): quad
             // layers are composed against live tracking and must not carry the artificial turn.
             xr.grip_pose_raw[h] = xr.grip_pose[h];
+            xr.aim_pose_raw[h] = xr.aim_pose[h];
             xr.grip_pose[h] = apply_turn(xr.grip_pose[h]);
             xr.aim_pose[h] = apply_turn(xr.aim_pose[h]);
         }
     }
+
+    vr_menu_update();
 
     // Physical-combat substrate: push this frame's RAW hand kinematics, then integrate one step
     // with the frame's world context (snap turn + the same blended anchor vr_get_hand_pose uses,
@@ -1909,7 +2096,20 @@ void vr_end_frame() {
 
     // Assemble layers back-to-front. The projection (world) layer is only submitted once its
     // swapchains have ever been rendered (at boot we go straight into flat-screen file select).
-    const XrCompositionLayerBaseHeader* layers[3];
+    // QuestShip: settings menu quad, on top of everything (alpha-blended ImGui windows).
+    XrCompositionLayerQuad menu_layer = { XR_TYPE_COMPOSITION_LAYER_QUAD };
+    menu_layer.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+    menu_layer.space = xr.local_space;
+    menu_layer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+    menu_layer.subImage.swapchain = xr.menu_swapchain.handle;
+    menu_layer.subImage.imageRect.offset = { 0, 0 };
+    menu_layer.subImage.imageRect.extent = { static_cast<int32_t>(xr.menu_swapchain.width),
+                                             static_cast<int32_t>(xr.menu_swapchain.height) };
+    menu_layer.subImage.imageArrayIndex = 0;
+    menu_layer.pose = xr.menu_pose;
+    menu_layer.size = { vr_menu_width_m(), vr_menu_width_m() * 0.75f };
+
+    const XrCompositionLayerBaseHeader* layers[4];
     uint32_t layer_count = 0;
     if (xr.eyes_ever_rendered) {
         layers[layer_count++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection_layer);
@@ -1923,6 +2123,10 @@ void vr_end_frame() {
     // the panel instead), so a stale HUD image doesn't float over the pause menu.
     if (xr.hud_ever_rendered && xr.hud_commands != nullptr) {
         layers[layer_count++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&hud_layer);
+    }
+
+    if (xr.menu_open && xr.menu_ever_rendered) {
+        layers[layer_count++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&menu_layer);
     }
 
     XrFrameEndInfo end_info = { XR_TYPE_FRAME_END_INFO };
@@ -2562,9 +2766,118 @@ void vr_register_hand_child_matrix(const void* mtx, int hand, const float* local
     }
 }
 
+struct SpaceMtx {
+    glm::vec3 anchor_m;   // physical (raw tracking) point, meters
+    glm::vec3 offset;     // game units, physical axes
+    glm::mat4 model;      // rotation/scale
+    float spin_dps;
+};
+static std::unordered_map<const void*, SpaceMtx> g_space_registry;
+
 void vr_clear_hand_matrices() {
     g_hand_mtx_registry.clear();
     g_hand_child_registry.clear();
+    g_space_registry.clear();
+}
+
+bool vr_get_hand_position_physical(int hand, float out_m[3]) {
+    if (hand < 0 || hand > 1 || !xr.initialized || !xr.input_initialized || !xr.hand_active[hand]) {
+        out_m[0] = out_m[1] = out_m[2] = 0.0f;
+        return false;
+    }
+    // grip_pose_raw: the real controller, untouched by the turn and by the physics hand sim.
+    out_m[0] = xr.grip_pose_raw[hand].position.x;
+    out_m[1] = xr.grip_pose_raw[hand].position.y;
+    out_m[2] = xr.grip_pose_raw[hand].position.z;
+    return true;
+}
+
+bool vr_get_head_right_physical(float out[3]) {
+    if (!xr.initialized || !xr.head_raw_valid) {
+        out[0] = 1.0f;
+        out[1] = out[2] = 0.0f;
+        return false;
+    }
+    const XrQuaternionf& o = xr.head_raw.orientation;
+    glm::vec3 r = glm::quat(o.w, o.x, o.y, o.z) * glm::vec3(1.0f, 0.0f, 0.0f);
+    r.y = 0.0f;
+    const float len = glm::length(r);
+    r = (len > 1e-4f) ? r / len : glm::vec3(1.0f, 0.0f, 0.0f);
+    out[0] = r.x;
+    out[1] = r.y;
+    out[2] = r.z;
+    return true;
+}
+
+bool vr_get_head_pose_physical(float pos_m[3], float fwd_flat[3]) {
+    if (!xr.initialized || !xr.head_raw_valid) {
+        pos_m[0] = pos_m[1] = pos_m[2] = 0.0f;
+        fwd_flat[0] = fwd_flat[1] = 0.0f;
+        fwd_flat[2] = -1.0f;
+        return false;
+    }
+    pos_m[0] = xr.head_raw.position.x;
+    pos_m[1] = xr.head_raw.position.y;
+    pos_m[2] = xr.head_raw.position.z;
+    const XrQuaternionf& o = xr.head_raw.orientation;
+    glm::vec3 f = glm::quat(o.w, o.x, o.y, o.z) * glm::vec3(0.0f, 0.0f, -1.0f);
+    f.y = 0.0f;
+    const float len = glm::length(f);
+    f = (len > 1e-4f) ? f / len : glm::vec3(0.0f, 0.0f, -1.0f);
+    fwd_flat[0] = f.x;
+    fwd_flat[1] = 0.0f;
+    fwd_flat[2] = f.z;
+    return true;
+}
+
+// Same composition as vr_get_hand_pose: live-blended anchor + turned position * world scale.
+static glm::vec3 vr_physical_to_world_v(const glm::vec3& p_m) {
+    XrPosef p;
+    p.position = { p_m.x, p_m.y, p_m.z };
+    p.orientation = { 0.0f, 0.0f, 0.0f, 1.0f };
+    const XrPosef t = apply_turn(p);
+    const glm::vec3 anchor = (xr.first_person && xr.anchor_initialized)
+                                 ? glm::mix(xr.anchor_prev, xr.anchor, xr.interp_alpha)
+                                 : glm::vec3(0.0f);
+    return anchor + glm::vec3(t.position.x, t.position.y, t.position.z) * xr.world_scale;
+}
+
+void vr_physical_to_world(const float in_m[3], float out[3]) {
+    const glm::vec3 w = vr_physical_to_world_v(glm::vec3(in_m[0], in_m[1], in_m[2]));
+    out[0] = w.x;
+    out[1] = w.y;
+    out[2] = w.z;
+}
+
+void vr_register_space_matrix(const void* mtx, const float anchor_m[3], const float offset_units[3],
+                              const float* model_mf16, float spin_deg_per_s) {
+    if (!mtx || !anchor_m || !offset_units || !model_mf16) {
+        return;
+    }
+    SpaceMtx& e = g_space_registry[mtx];
+    e.anchor_m = glm::vec3(anchor_m[0], anchor_m[1], anchor_m[2]);
+    e.offset = glm::vec3(offset_units[0], offset_units[1], offset_units[2]);
+    memcpy(&e.model[0][0], model_mf16, sizeof(float) * 16);
+    e.spin_dps = spin_deg_per_s;
+}
+
+static bool vr_lookup_space_matrix(const void* mtx, float out[4][4]) {
+    auto it = g_space_registry.find(mtx);
+    if (it == g_space_registry.end()) {
+        return false;
+    }
+    const SpaceMtx& e = it->second;
+    static const auto t0 = std::chrono::steady_clock::now();
+    const float t = std::chrono::duration<float>(std::chrono::steady_clock::now() - t0).count();
+    const float kDeg = 3.14159265358979323846f / 180.0f;
+    const float spin = fmodf(e.spin_dps * t, 360.0f) * kDeg;
+    const glm::mat4 m = glm::translate(glm::mat4(1.0f), vr_physical_to_world_v(e.anchor_m)) *
+                        glm::mat4_cast(g_turn_rot) * glm::translate(glm::mat4(1.0f), e.offset) *
+                        glm::rotate(glm::mat4(1.0f), spin, glm::vec3(0.0f, 1.0f, 0.0f)) * e.model;
+    for (int r = 0; r < 4; r++)
+        for (int c = 0; c < 4; c++)
+            out[r][c] = m[r][c];
+    return true;
 }
 
 bool vr_lookup_hand_matrix(const void* mtx, float out[4][4]) {
@@ -2576,6 +2889,9 @@ bool vr_lookup_hand_matrix(const void* mtx, float out[4][4]) {
         if (it != g_hand_mtx_registry.end()) {
             return vr_get_hand_matrix(it->second, out);
         }
+    }
+    if (!g_space_registry.empty() && vr_lookup_space_matrix(mtx, out)) {
+        return true;
     }
     if (!g_hand_child_registry.empty()) {
         auto it = g_hand_child_registry.find(mtx);
@@ -2858,6 +3174,40 @@ void vr_trigger_haptic(int, float, float, float) {}
 void vr_register_hand_matrix(const void*, int) {}
 void vr_register_hand_child_matrix(const void*, int, const float*) {}
 void vr_clear_hand_matrices() {}
+bool vr_get_hand_position_physical(int, float out_m[3]) {
+    out_m[0] = out_m[1] = out_m[2] = 0.0f;
+    return false;
+}
+bool vr_get_head_right_physical(float out[3]) {
+    out[0] = 1.0f;
+    out[1] = out[2] = 0.0f;
+    return false;
+}
+bool vr_get_head_pose_physical(float pos_m[3], float fwd_flat[3]) {
+    pos_m[0] = pos_m[1] = pos_m[2] = 0.0f;
+    fwd_flat[0] = fwd_flat[1] = 0.0f;
+    fwd_flat[2] = -1.0f;
+    return false;
+}
+void vr_physical_to_world(const float in_m[3], float out[3]) {
+    out[0] = in_m[0];
+    out[1] = in_m[1];
+    out[2] = in_m[2];
+}
+void vr_register_space_matrix(const void*, const float*, const float*, const float*, float) {}
+void vr_menu_set_open(bool) {}
+bool vr_menu_is_open() { return false; }
+bool vr_is_rendering_menu() { return false; }
+void vr_menu_get_size(uint32_t* w, uint32_t* h) { *w = 1280; *h = 960; }
+bool vr_menu_pointer(float* x, float* y, bool* down, float* wheel) {
+    *x = *y = *wheel = 0.0f;
+    *down = false;
+    return false;
+}
+bool vr_take_start_tap() { return false; }
+bool vr_menu_consumes_button(int, uint16_t) { return false; }
+void vr_begin_menu() {}
+void vr_end_menu() {}
 bool vr_lookup_hand_matrix(const void*, float out[4][4]) {
     for (int r = 0; r < 4; r++)
         for (int c = 0; c < 4; c++)

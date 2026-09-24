@@ -350,4 +350,37 @@ void VR_ClearHandMatrices(void) {
     vr_clear_hand_matrices();
 }
 
+bool VR_GetHandPositionPhysical(int hand, float outM[3]) {
+    return vr_get_hand_position_physical(hand, outM);
+}
+
+bool VR_GetHeadRightPhysical(float out[3]) {
+    return vr_get_head_right_physical(out);
+}
+
+bool VR_GetHeadPosePhysical(float posM[3], float fwdFlat[3]) {
+    return vr_get_head_pose_physical(posM, fwdFlat);
+}
+
+void VR_PhysicalToWorld(const float inM[3], float out[3]) {
+    vr_physical_to_world(inM, out);
+}
+
+bool VR_MenuIsOpen(void) {
+    return vr_menu_is_open();
+}
+
+bool VR_MenuConsumesButton(int hand, uint16_t mask) {
+    return vr_menu_consumes_button(hand, mask);
+}
+
+bool VR_TakeStartTap(void) {
+    return vr_take_start_tap();
+}
+
+void VR_RegisterSpaceMatrix(const void* mtx, const float anchorM[3], const float offsetUnits[3],
+                            const float* modelMf16, float spinDegPerS) {
+    vr_register_space_matrix(mtx, anchorM, offsetUnits, modelMf16, spinDegPerS);
+}
+
 }
