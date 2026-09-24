@@ -4916,6 +4916,12 @@ static void gfx_step() {
         if (opcode == OTR_G_VTX_OTR_FILEPATH || opcode == OTR_G_SETTIMG_OTR_FILEPATH ||
             opcode == OTR_G_DL_OTR_FILEPATH || opcode == OTR_G_PUSHCD || opcode == OTR_G_MTX_OTR_FILEPATH) {
             uintptr_t w1 = (uintptr_t)cmd->words.w1;
+#if defined(__aarch64__) && defined(__ANDROID__)
+            // Android tags heap pointers in the top byte (see gfx_check_image_signature). Without
+            // stripping it, every path-referenced vtx/DL/texture from mods (e.g. Djipi's scene
+            // meshes) is dropped as a "kernel address" and the geometry silently disappears.
+            w1 &= 0x00FFFFFFFFFFFFFFull;
+#endif
             if (w1 < 0x10000
 #if UINTPTR_MAX > 0xFFFFFFFFu
                 // On 64-bit: filter kernel/sentinel addresses.
