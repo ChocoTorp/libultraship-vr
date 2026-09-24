@@ -279,6 +279,7 @@ void     VR_RegisterHandMatrix(const void* mtx, int hand);
 // (live hand pose) x (localMf16, MtxF layout), so it stays welded to the live-rendered hand.
 void     VR_RegisterHandChildMatrix(const void* mtx, int hand, const float* localMf16);
 void     VR_ClearHandMatrices(void);
+void     VR_SetHandMeshScaled(int hand, bool scaled);
 // QuestShip: physical-space (raw tracking, meters) queries and space-locked matrices; see
 // vr_openxr.h. Unaffected by stick locomotion and artificial turning.
 bool     VR_GetHandPositionPhysical(int hand, float outM[3]);

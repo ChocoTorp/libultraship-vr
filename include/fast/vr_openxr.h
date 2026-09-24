@@ -131,6 +131,9 @@ bool vr_get_hand_matrix(int hand, float out[4][4]);
 // the hands track at headset rate instead of the interpolated game rate. vr_set_hand_scale folds in
 // Link's model scale so the live-replaced hand renders at the right size.
 void vr_set_hand_scale(float s);
+// QuestShip: whether the hand MESH gets gVrHandMeshScale this frame (only when the hand is empty:
+// hand+item DLs like "fist holding sword" are one mesh and must keep their size).
+void vr_set_hand_mesh_scaled(int hand, bool scaled);
 void vr_set_hand_mirror(int hand, bool mirror);
 void vr_register_hand_matrix(const void* mtx, int hand);
 // Hand-CHILD matrix: substituted with (live hand pose) x (local_mf16, MtxF layout) — for

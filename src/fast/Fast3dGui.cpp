@@ -590,7 +590,12 @@ void Fast3dGui::LoadGuiTexture(const std::string& name, const Fast::Texture& res
             return;
         }
 
-        texBuffer.assign(res.ImageData, res.ImageData + (res.Width * res.Height * 4));
+        // QuestShip: ASTC texture-pack textures have no CPU pixels of their own; use the RGBA original.
+        uint8_t* pixels = const_cast<Fast::Texture&>(res).CpuPixels(); // lazily loads the fallback
+        if (pixels == nullptr) {
+            return;
+        }
+        texBuffer.assign(pixels, pixels + (res.Width * res.Height * 4));
     } else {
         switch (res.Type) {
             case Fast::TextureType::RGBA32bpp:

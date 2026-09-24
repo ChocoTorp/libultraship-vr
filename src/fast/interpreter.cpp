@@ -30,6 +30,7 @@
 #include "fast/backends/gfx_window_manager_api.h"
 #include "fast/backends/gfx_rendering_api.h"
 #include "fast/vr_openxr.h"
+#include "libultraship/bridge/consolevariablebridge.h" // QuestShip: gTextureAstc
 
 #include "ship/window/gui/Gui.h"
 #include "ship/resource/ResourceManager.h"
@@ -125,6 +126,17 @@ Interpreter::~Interpreter() {
 }
 
 static std::weak_ptr<Interpreter> mInstance;
+
+// QuestShip: the address the renderer tracks for a texture. ASTC textures have no CPU pixels, so
+// they get a unique reserved address range (Texture::AstcSentinel); ImportTexture maps it back.
+static uint64_t gAstcUploads = 0, gAstcFallbacks = 0;
+
+static char* TexRendererAddr(Fast::Texture* t) {
+    if (t == nullptr) {
+        return nullptr;
+    }
+    return reinterpret_cast<char*>(t->IsAstc ? t->AstcSentinel() : t->ImageData);
+}
 
 // QuestShip: cache of resource lookups made while interpreting display lists.
 // Mods (e.g. Djipi's 3DS Experience) reference vertices/DLs/textures by OTR PATH, and every such
@@ -1344,6 +1356,43 @@ void Interpreter::ImportTexture(int i, int tile, bool importReplacement) {
         }
     }
 
+    // QuestShip ASTC: a texture-pack texture stored GPU-compressed. Upload the compressed mip chain
+    // when the GPU consumes the whole image as-is (same test as ImportTextureRaw's direct upload);
+    // otherwise (sub-rect load, restride, mask, blend, kill switch) switch to the original RGBA
+    // pixels at the same offset and let the normal path run unchanged.
+    std::shared_ptr<Fast::Texture> astcTex;
+    if (!importReplacement && origAddr != nullptr && metadata->resource != nullptr && metadata->resource->IsAstc) {
+        const auto& lt = mRdp->loaded_texture[tmemIdex];
+        uint8_t* base = metadata->resource->AstcSentinel();
+        const uintptr_t off = (uintptr_t)origAddr - (uintptr_t)base;
+        bool direct = false;
+        if (base != nullptr && off == 0 && !lt.masked && !lt.blended && CVarGetInteger("gTextureAstc", 1)) {
+            uint32_t origLine = mRdp->texture_tile[tile].line_size_bytes;
+            if (mRdp->texture_tile[tile].siz == G_IM_SIZ_32b) {
+                origLine *= 2;
+            }
+            if (origLine > 0) {
+                const uint32_t origH = lt.orig_size_bytes / origLine;
+                const uint32_t newLine = (uint32_t)(origLine * metadata->h_byte_scale);
+                const uint32_t newH = (uint32_t)(origH * metadata->v_pixel_scale);
+                direct = newLine == 4u * metadata->width && newH == metadata->height &&
+                         metadata->width == metadata->resource->PixelWidth &&
+                         metadata->height == metadata->resource->PixelHeight;
+            }
+        }
+        if (direct) {
+            astcTex = metadata->resource;
+        } else {
+            uint8_t* cpu = metadata->resource->CpuPixels();
+            if (cpu == nullptr) {
+                return;
+            }
+            origAddr = cpu + off;
+            mRdp->loaded_texture[tmemIdex].addr = origAddr;
+            gAstcFallbacks++;
+        }
+    }
+
     if (origAddr == nullptr) {
         // Try the other TMEM slot -- some multi-tile setups only load one slot
         // and expect both tiles to reference it.
@@ -1391,6 +1440,31 @@ void Interpreter::ImportTexture(int i, int tile, bool importReplacement) {
     if (mRdp->texture_tile[tile].line_size_bytes == 0 || mRdp->loaded_texture[tmemIdex].size_bytes == 0 ||
         origAddr == nullptr) {
         return;
+    }
+
+    if (astcTex != nullptr) {
+        std::vector<uint32_t> w, h, sz;
+        std::vector<const uint8_t*> d;
+        for (const auto& lv : astcTex->AstcLevels) {
+            w.push_back(lv.Width);
+            h.push_back(lv.Height);
+            sz.push_back(lv.Size);
+            d.push_back(lv.Data);
+        }
+        if (mRapi->UploadCompressedTexture(astcTex->AstcBlockX, astcTex->AstcBlockY, (uint32_t)d.size(), w.data(),
+                                           h.data(), d.data(), sz.data())) {
+            if ((++gAstcUploads % 250) == 1) {
+                SPDLOG_INFO("[ASTC] compressed uploads {}, RGBA fallbacks {}", gAstcUploads, gAstcFallbacks);
+            }
+            return;
+        }
+        // GPU/backend can't take ASTC: use the original RGBA pixels (key already allocated above).
+        uint8_t* cpu = astcTex->CpuPixels();
+        if (cpu == nullptr) {
+            return;
+        }
+        mRdp->loaded_texture[tmemIdex].addr = cpu;
+        gAstcFallbacks++;
     }
 
     if ((texFlags & TEX_FLAG_LOAD_AS_IMG) != 0) {
@@ -3245,7 +3319,7 @@ void Interpreter::Gfxs2dexBgCopy(F3DuObjBg* bg) {
         rawTexMetadata.v_pixel_scale = tex->VPixelScale;
         rawTexMetadata.type = tex->Type;
         rawTexMetadata.resource = tex;
-        data = (uintptr_t) reinterpret_cast<char*>(tex->ImageData);
+        data = (uintptr_t) reinterpret_cast<char*>(tex->CpuPixels()); // QuestShip: real pixels
     }
 
     s16 dsdx = 4 << 10;
@@ -3282,7 +3356,7 @@ void Interpreter::Gfxs2dexBg1cyc(F3DuObjBg* bg) {
         rawTexMetadata.v_pixel_scale = tex->VPixelScale;
         rawTexMetadata.type = tex->Type;
         rawTexMetadata.resource = tex;
-        data = (uintptr_t) reinterpret_cast<char*>(tex->ImageData);
+        data = (uintptr_t) reinterpret_cast<char*>(tex->CpuPixels()); // QuestShip: real pixels
     }
 
     // TODO: Implement bg scaling correctly
@@ -4105,7 +4179,7 @@ bool gfx_set_timg_handler_rdp(F3DGfx** cmd0) {
                 return false;
             }
 
-            i = (uintptr_t) reinterpret_cast<char*>(tex->ImageData);
+            i = (uintptr_t)TexRendererAddr(tex.get()); // QuestShip: ASTC-aware
             texFlags = tex->Flags;
             rawTexMetdata.width = tex->Width;
             rawTexMetdata.height = tex->Height;
@@ -4169,7 +4243,7 @@ bool gfx_set_timg_otr_hash_handler_custom(F3DGfx** cmd0) {
         // support. In doing so, there is a potential performance hit since we are not caching lookups. We
         // need to do proper profiling to see whether or not it is worth it to keep the caching system.
 
-        char* tex = reinterpret_cast<char*>(texture->ImageData);
+        char* tex = TexRendererAddr(texture.get()); // QuestShip: ASTC-aware
 
         if (tex != nullptr) {
             (*cmd0)--;
@@ -4226,7 +4300,7 @@ bool gfx_set_timg_otr_filepath_handler_custom(F3DGfx** cmd0) {
         uint32_t width = C0(0, 12) + 1;
 
         gfx->GfxDpSetTextureImage(fmt, size, width, fileName, texFlags, rawTexMetadata,
-                                  reinterpret_cast<char*>(texture->ImageData));
+                                  TexRendererAddr(texture.get())); // QuestShip: ASTC-aware
     } else {
         SPDLOG_ERROR("G_SETTIMG_OTR_FILEPATH: Texture is null");
     }
@@ -5568,7 +5642,7 @@ void Interpreter::RegisterBlendedTexture(const char* name, uint8_t* mask, uint8_
                                      reinterpret_cast<char*>(replacement)))
                                  .get();
 
-        replacement = tex->ImageData;
+        replacement = tex->CpuPixels(); // QuestShip: real pixels (ASTC textures fall back)
     }
 
     mMaskedTextures[name] = MaskedTextureEntry{ mask, replacement };

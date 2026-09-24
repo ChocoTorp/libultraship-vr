@@ -47,6 +47,13 @@ class GfxRenderingAPI {
     virtual uint32_t NewTexture() = 0;
     virtual void SelectTexture(int tile, uint32_t textureId) = 0;
     virtual void UploadTexture(const uint8_t* rgba32Buf, uint32_t width, uint32_t height) = 0;
+    // QuestShip: upload a prebuilt ASTC mip chain into the selected texture. Backends without ASTC
+    // support return false and the caller falls back to RGBA.
+    virtual bool UploadCompressedTexture(uint32_t blockX, uint32_t blockY, uint32_t levelCount, const uint32_t* widths,
+                                         const uint32_t* heights, const uint8_t* const* data, const uint32_t* sizes) {
+        (void)blockX, (void)blockY, (void)levelCount, (void)widths, (void)heights, (void)data, (void)sizes;
+        return false;
+    }
     virtual void SetSamplerParameters(int sampler, bool linear_filter, uint32_t cms, uint32_t cmt) = 0;
     virtual void SetDepthTestAndMask(bool depth_test, bool z_upd) = 0;
     virtual void SetZmodeDecal(bool decal) = 0;

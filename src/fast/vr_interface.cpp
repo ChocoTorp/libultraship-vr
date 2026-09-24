@@ -346,6 +346,10 @@ void VR_RegisterHandChildMatrix(const void* mtx, int hand, const float* localMf1
     vr_register_hand_child_matrix(mtx, hand, localMf16);
 }
 
+void VR_SetHandMeshScaled(int hand, bool scaled) {
+    vr_set_hand_mesh_scaled(hand, scaled);
+}
+
 void VR_ClearHandMatrices(void) {
     vr_clear_hand_matrices();
 }

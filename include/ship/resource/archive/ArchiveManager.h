@@ -111,6 +111,10 @@ class ArchiveManager {
      * @return Loaded File, or nullptr if not found.
      */
     std::shared_ptr<File> LoadFile(uint64_t hash);
+    // QuestShip: load `filePath` from the highest-priority archive BELOW the one that currently
+    // provides it (e.g. the original texture pack underneath an ASTC-converted override).
+    std::shared_ptr<File> LoadFileFromLowerArchives(const std::string& filePath,
+                                                    std::shared_ptr<Archive>* fromArchive = nullptr);
 
     /**
      * @brief Writes raw data into a specific archive.

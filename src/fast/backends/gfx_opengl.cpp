@@ -641,6 +641,7 @@ void GfxRenderingAPIOGL::UploadTexture(const uint8_t* rgba32_buf, uint32_t width
     if (width == 0 || height == 0) {
         return;
     }
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 1000); // QuestShip: undo a previous ASTC chain's cap
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba32_buf);
     textures[mCurrentTextureIds[mCurrentTile]].width = width;
     textures[mCurrentTextureIds[mCurrentTile]].height = height;
@@ -670,6 +671,34 @@ static uint32_t gfx_cm_to_opengl(uint32_t val) {
             return GL_REPEAT;
     }
     return 0;
+}
+
+// QuestShip: prebuilt ASTC mip chain (texture-pack textures converted by questship-texconv).
+bool GfxRenderingAPIOGL::UploadCompressedTexture(uint32_t blockX, uint32_t blockY, uint32_t levelCount,
+                                                 const uint32_t* widths, const uint32_t* heights,
+                                                 const uint8_t* const* data, const uint32_t* sizes) {
+    if (!mAstcSupported || levelCount == 0) {
+        return false;
+    }
+    GLenum fmt = 0;
+    if (blockX == 4 && blockY == 4) {
+        fmt = 0x93B0; // GL_COMPRESSED_RGBA_ASTC_4x4_KHR
+    } else if (blockX == 6 && blockY == 6) {
+        fmt = 0x93B4; // GL_COMPRESSED_RGBA_ASTC_6x6_KHR
+    } else if (blockX == 8 && blockY == 8) {
+        fmt = 0x93B7; // GL_COMPRESSED_RGBA_ASTC_8x8_KHR
+    } else {
+        return false;
+    }
+    for (uint32_t l = 0; l < levelCount; l++) {
+        glCompressedTexImage2D(GL_TEXTURE_2D, l, fmt, widths[l], heights[l], 0, sizes[l], data[l]);
+    }
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, (GLint)levelCount - 1);
+    TextureInfo& info = textures[mCurrentTextureIds[mCurrentTile]];
+    info.width = widths[0];
+    info.height = heights[0];
+    info.mipmapped = levelCount > 1;
+    return true;
 }
 
 void GfxRenderingAPIOGL::SetSamplerParameters(int tile, bool linear_filter, uint32_t cms, uint32_t cmt) {
@@ -865,6 +894,8 @@ void GfxRenderingAPIOGL::Init() {
         if (ext != nullptr && strstr(ext, "GL_EXT_texture_filter_anisotropic") != nullptr) {
             glGetFloatv(0x84FF /* GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT */, &mMaxAnisotropy);
         }
+        mAstcSupported = ext != nullptr && strstr(ext, "GL_KHR_texture_compression_astc_ldr") != nullptr;
+        SPDLOG_INFO("[GL] ASTC textures: {}", mAstcSupported ? "supported" : "not supported");
     }
 }
 

@@ -81,6 +81,8 @@ class GfxRenderingAPIOGL final : public GfxRenderingAPI {
     uint32_t NewTexture() override;
     void SelectTexture(int tile, uint32_t textureId) override;
     void UploadTexture(const uint8_t* rgba32Buf, uint32_t width, uint32_t height) override;
+    bool UploadCompressedTexture(uint32_t blockX, uint32_t blockY, uint32_t levelCount, const uint32_t* widths,
+                                 const uint32_t* heights, const uint8_t* const* data, const uint32_t* sizes) override;
     void SetSamplerParameters(int sampler, bool linear_filter, uint32_t cms, uint32_t cmt) override;
     void SetDepthTestAndMask(bool depth_test, bool z_upd) override;
     void SetCurrentPrimDepth(float depth) override;
@@ -152,6 +154,7 @@ class GfxRenderingAPIOGL final : public GfxRenderingAPI {
 
     GLuint mOpenglVbo = 0;
     float mMaxAnisotropy = 0.0f; // QuestShip: 0 = EXT_texture_filter_anisotropic unavailable
+    bool mAstcSupported = false;  // QuestShip: GL_KHR_texture_compression_astc_ldr
 
     // QuestShip: persistent-mapped vertex ring (EXT_buffer_storage), see DrawTriangles.
     struct VboFence {

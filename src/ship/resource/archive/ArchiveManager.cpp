@@ -59,6 +59,32 @@ std::shared_ptr<File> ArchiveManager::LoadFile(uint64_t hash) {
     return archive->LoadFile(hash);
 }
 
+std::shared_ptr<File> ArchiveManager::LoadFileFromLowerArchives(const std::string& filePath,
+                                                                std::shared_ptr<Archive>* fromArchive) {
+    const uint64_t hash = CRC64(filePath.c_str());
+    auto top = mFileToArchive.find(hash);
+    if (top == mFileToArchive.end()) {
+        return nullptr;
+    }
+    bool below = false;
+    for (auto it = mArchives.rbegin(); it != mArchives.rend(); ++it) {
+        if (!below) {
+            below = (*it == top->second);
+            continue;
+        }
+        if ((*it)->HasFile(hash)) {
+            auto file = (*it)->LoadFile(filePath);
+            if (file != nullptr) {
+                if (fromArchive != nullptr) {
+                    *fromArchive = *it;
+                }
+                return file;
+            }
+        }
+    }
+    return nullptr;
+}
+
 bool ArchiveManager::HasFile(const std::string& filePath) {
     return HasFile(CRC64(filePath.c_str()));
 }

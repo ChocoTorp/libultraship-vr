@@ -2827,8 +2827,14 @@ bool vr_get_hand_matrix(int hand, float out[4][4]) {
     if (mirrored) {
         sc[axis] = -sc[axis];
     }
+    // QuestShip: the hand model's origin is the wrist joint; shift the whole hand frame so the PALM
+    // (model units, default = the fist/blade line the sword code uses, D_80126080.y) sits on the
+    // controller grip point. Held items share this frame, so they stay in the fist and physical
+    // weapon collision stays consistent with what is drawn.
+    const glm::vec3 palm(CVarGetFloat("gVrHandPalmX", 0.0f), CVarGetFloat("gVrHandPalmY", 400.0f),
+                         CVarGetFloat("gVrHandPalmZ", 0.0f));
     glm::mat4 m = glm::translate(glm::mat4(1.0f), world_pos + q * off) * glm::mat4_cast(q * cal) *
-                  glm::scale(glm::mat4(1.0f), sc);
+                  glm::scale(glm::mat4(1.0f), sc) * glm::translate(glm::mat4(1.0f), -palm);
     for (int r = 0; r < 4; r++)
         for (int c = 0; c < 4; c++)
             out[r][c] = m[r][c];
@@ -2836,6 +2842,13 @@ bool vr_get_hand_matrix(int hand, float out[4][4]) {
 }
 
 // Folds Link's model scale into the live hand matrix (the game sets this to actor.scale each frame).
+static bool g_hand_mesh_scaled[2] = { false, false };
+void vr_set_hand_mesh_scaled(int hand, bool scaled) {
+    if (hand >= 0 && hand <= 1) {
+        g_hand_mesh_scaled[hand] = scaled;
+    }
+}
+
 void vr_set_hand_scale(float s) {
     g_hand_scale = s;
 }
@@ -2994,7 +3007,26 @@ bool vr_lookup_hand_matrix(const void* mtx, float out[4][4]) {
     if (!g_hand_mtx_registry.empty()) {
         auto it = g_hand_mtx_registry.find(mtx);
         if (it != g_hand_mtx_registry.end()) {
-            return vr_get_hand_matrix(it->second, out);
+            if (!vr_get_hand_matrix(it->second, out)) {
+                return false;
+            }
+            // QuestShip: shrink the hand MESH only (not held items, which use the plain hand
+            // matrix), scaling around the palm so the palm stays on the grip point.
+            const float k = CVarGetFloat("gVrHandMeshScale", 0.75f);
+            if (k != 1.0f && g_hand_mesh_scaled[it->second]) {
+                const glm::vec3 palm(CVarGetFloat("gVrHandPalmX", 0.0f), CVarGetFloat("gVrHandPalmY", 400.0f),
+                                     CVarGetFloat("gVrHandPalmZ", 0.0f));
+                glm::mat4 h;
+                for (int r = 0; r < 4; r++)
+                    for (int c = 0; c < 4; c++)
+                        h[r][c] = out[r][c];
+                h = h * glm::translate(glm::mat4(1.0f), palm) * glm::scale(glm::mat4(1.0f), glm::vec3(k)) *
+                    glm::translate(glm::mat4(1.0f), -palm);
+                for (int r = 0; r < 4; r++)
+                    for (int c = 0; c < 4; c++)
+                        out[r][c] = h[r][c];
+            }
+            return true;
         }
     }
     if (!g_space_registry.empty() && vr_lookup_space_matrix(mtx, out)) {
@@ -3277,6 +3309,7 @@ bool vr_get_hand_matrix(int, float out[4][4]) {
     return false;
 }
 void vr_set_hand_scale(float) {}
+void vr_set_hand_mesh_scaled(int, bool) {}
 void vr_set_hand_mirror(int, bool) {}
 void vr_trigger_haptic(int, float, float, float) {}
 void vr_register_hand_matrix(const void*, int) {}
