@@ -128,7 +128,7 @@ std::string SDLGyroMapping::GetPhysicalDeviceName() {
 #ifdef __ANDROID__
 void SDLGyroMapping::GetAndroidGyroData(float gyroData[3]) {
     for (const auto& [instanceId, gamepad] :
-         Context::GetInstance()->GetControlDeck()->GetConnectedPhysicalDeviceManager()->GetConnectedSDLGamepadsForPort(
+         Context::GetRawInstance()->GetControlDeck()->GetConnectedPhysicalDeviceManager()->GetConnectedSDLGamepadsForPort(
              mPortIndex)) {
         if (!SDL_GameControllerHasSensor(gamepad, SDL_SENSOR_GYRO)) {
             continue;

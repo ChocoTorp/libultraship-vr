@@ -227,7 +227,7 @@ void Gui::DrawMenu() {
         } else if (GetMenuBar()) {
             GetMenuBar()->ToggleVisibility();
         }
-        Ship::Context::GetInstance()->GetWindow()->GetMouseStateManager()->UpdateMouseCapture();
+        Ship::Context::GetRawInstance()->GetWindow()->GetMouseStateManager()->UpdateMouseCapture();
         if (GetMenuOrMenubarVisible()) {
             mImGuiIo->ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
         } else {
