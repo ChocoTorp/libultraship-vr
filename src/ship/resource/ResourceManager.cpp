@@ -412,6 +412,7 @@ size_t ResourceManager::UnloadResource(const ResourceIdentifier& identifier) {
     if (mResourceCache.contains(identifier)) {
         const std::lock_guard<std::mutex> lock(mMutex);
         mResourceCache.erase(identifier);
+        mCacheGeneration++;
     }
 
     return ret;
@@ -424,6 +425,7 @@ size_t ResourceManager::UnloadResource(const std::string& filePath) {
 void ResourceManager::CacheExternalResource(const std::string& filePath, std::shared_ptr<IResource> resource) {
     const std::lock_guard<std::mutex> lock(mMutex);
     mResourceCache[{ filePath, mDefaultCacheOwner, mDefaultCacheArchive }] = resource;
+    mCacheGeneration++;
 }
 
 bool ResourceManager::WriteResource(const ResourceIdentifier& identifier, const std::vector<uint8_t>& data,
@@ -460,6 +462,7 @@ bool ResourceManager::IsAltAssetsEnabled() {
 
 void ResourceManager::SetAltAssetsEnabled(bool isEnabled) {
     mAltAssetsEnabled = isEnabled;
+    mCacheGeneration++;
 }
 
 size_t ResourceManager::GetResourceSize(std::shared_ptr<IResource> resource) {

@@ -21,6 +21,12 @@
 #include "fast/backends/gfx_opengl.h"
 #include <cstring>
 #include "libultraship/bridge/consolevariablebridge.h"
+#include <spdlog/spdlog.h>
+#if defined(USE_OPENGLES)
+#include <EGL/egl.h>
+#endif
+
+static constexpr size_t kVboRingBytes = 64u * 1024u * 1024u; // QuestShip: persistent vertex ring size
 #include "ship/window/gui/Gui.h"
 #include <prism/processor.h>
 #include <fstream>
@@ -724,9 +730,28 @@ void GfxRenderingAPIOGL::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, size
     SetPerDrawUniforms();
 
     // printf("flushing %d tris\n", buf_vbo_num_tris);
-    // QuestShip note: a ring buffer with per-draw glMapBufferRange(UNSYNCHRONIZED) was tried
-    // (OOT_16) and was SLOWER on Quest: each map/unmap made the Adreno driver submit its command
-    // buffer (gsl_command_issueib_sync). Keep the plain per-draw upload.
+    // QuestShip: persistent-mapped ring. glBufferData per draw made the Adreno driver allocate
+    // GPU memory every call (~13% of the Quest game thread); per-draw map/unmap (tried in OOT_16)
+    // forced command-buffer submits instead. So: one immutable buffer mapped ONCE at init
+    // (EXT_buffer_storage, coherent), each draw memcpy'd into the next slice aligned to the vertex
+    // stride (glDrawArrays' `first` addresses it; attribute pointers stay at offset 0), and a fence
+    // per frame guards the ring from overwriting data the GPU may still read.
+    if (mVboMapped != nullptr) {
+        const size_t bytes = sizeof(float) * buf_vbo_len;
+        const size_t verts = 3 * buf_vbo_num_tris;
+        const size_t stride = verts > 0 ? bytes / verts : 0;
+        if (stride > 0 && bytes <= kVboRingBytes / 4) {
+            size_t off = ((mVboCursor + stride - 1) / stride) * stride;
+            if (off + bytes > kVboRingBytes) {
+                off = 0;
+            }
+            VboWaitFor(off, bytes);
+            memcpy(mVboMapped + off, buf_vbo, bytes);
+            glDrawArrays(GL_TRIANGLES, (GLint)(off / stride), (GLsizei)verts);
+            mVboCursor = off + bytes;
+        }
+        return; // the immutable buffer can't take glBufferData; oversized draws are skipped
+    }
     glBufferData(GL_ARRAY_BUFFER, sizeof(float) * buf_vbo_len, buf_vbo, GL_STREAM_DRAW);
     glDrawArrays(GL_TRIANGLES, 0, 3 * buf_vbo_num_tris);
 }
@@ -738,6 +763,20 @@ void GfxRenderingAPIOGL::Init() {
 
     glGenBuffers(1, &mOpenglVbo);
     glBindBuffer(GL_ARRAY_BUFFER, mOpenglVbo);
+#if defined(USE_OPENGLES)
+    // QuestShip: persistent-mapped vertex ring when EXT_buffer_storage is available (see DrawTriangles).
+    if (CVarGetInteger("gGlPersistentVbo", 1)) {
+        typedef void (*PFN_BufferStorageEXT)(GLenum, GLsizeiptr, const void*, GLbitfield);
+        const char* ext = reinterpret_cast<const char*>(glGetString(GL_EXTENSIONS));
+        auto bufferStorage = reinterpret_cast<PFN_BufferStorageEXT>(eglGetProcAddress("glBufferStorageEXT"));
+        if (ext != nullptr && strstr(ext, "GL_EXT_buffer_storage") != nullptr && bufferStorage != nullptr) {
+            const GLbitfield flags = GL_MAP_WRITE_BIT | 0x0040 /* PERSISTENT_EXT */ | 0x0080 /* COHERENT_EXT */;
+            bufferStorage(GL_ARRAY_BUFFER, kVboRingBytes, nullptr, flags);
+            mVboMapped = static_cast<uint8_t*>(glMapBufferRange(GL_ARRAY_BUFFER, 0, kVboRingBytes, flags));
+            SPDLOG_INFO("[GL] Persistent vertex ring: {}", mVboMapped != nullptr ? "on" : "map failed");
+        }
+    }
+#endif
 
 #if defined(__APPLE__) || defined(USE_OPENGLES)
     glGenVertexArrays(1, &mOpenglVao);
@@ -783,7 +822,29 @@ void GfxRenderingAPIOGL::StartFrame() {
 }
 
 void GfxRenderingAPIOGL::EndFrame() {
+    if (mVboMapped != nullptr && mVboCursor != mVboFrameStart) {
+        mVboFences.push_back({ glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0), mVboFrameStart, mVboCursor });
+        mVboFrameStart = mVboCursor;
+    }
     glFlush();
+}
+
+// Wait until no in-flight frame's vertex data overlaps [off, off + bytes). The oldest fenced frame
+// is the region just ahead of the ring cursor, so only the front of the queue needs checking.
+void GfxRenderingAPIOGL::VboWaitFor(size_t off, size_t bytes) {
+    const size_t a0 = off, a1 = off + bytes;
+    auto overlaps = [&](size_t s, size_t e) {
+        if (s <= e) {
+            return a0 < e && s < a1;
+        }
+        return a0 < e || s < a1 || (a0 < kVboRingBytes && s < kVboRingBytes && a1 > s); // wrapped
+    };
+    while (!mVboFences.empty() && (overlaps(mVboFences.front().start, mVboFences.front().end) ||
+                                   mVboFences.size() > 8)) {
+        glClientWaitSync(mVboFences.front().fence, GL_SYNC_FLUSH_COMMANDS_BIT, 100000000ull); // 100 ms cap
+        glDeleteSync(mVboFences.front().fence);
+        mVboFences.pop_front();
+    }
 }
 
 void GfxRenderingAPIOGL::FinishRender() {

@@ -2,6 +2,7 @@
 #pragma once
 
 #include "gfx_rendering_api.h"
+#include <deque>
 #include "../interpreter.h"
 
 #ifdef _MSC_VER
@@ -131,6 +132,17 @@ class GfxRenderingAPIOGL final : public GfxRenderingAPI {
 
     GLuint mOpenglVbo = 0;
     float mMaxAnisotropy = 0.0f; // QuestShip: 0 = EXT_texture_filter_anisotropic unavailable
+
+    // QuestShip: persistent-mapped vertex ring (EXT_buffer_storage), see DrawTriangles.
+    struct VboFence {
+        GLsync fence;
+        size_t start, end; // byte range written that frame (start > end = wrapped)
+    };
+    uint8_t* mVboMapped = nullptr;
+    size_t mVboCursor = 0;
+    size_t mVboFrameStart = 0;
+    std::deque<VboFence> mVboFences;
+    void VboWaitFor(size_t off, size_t bytes);
 #if defined(__APPLE__) || defined(USE_OPENGLES)
     GLuint mOpenglVao;
 #endif

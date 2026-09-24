@@ -126,25 +126,39 @@ Interpreter::~Interpreter() {
 
 static std::weak_ptr<Interpreter> mInstance;
 
-// QuestShip: per-game-tick cache of resource lookups made while interpreting display lists.
+// QuestShip: cache of resource lookups made while interpreting display lists.
 // Mods (e.g. Djipi's 3DS Experience) reference vertices/DLs/textures by OTR PATH, and every such
 // command hashed the path string and searched the resource cache again — per object, per eye,
-// per interpolated frame (~26% of the Quest game thread in Hyrule Field). A resource can't change
-// within one game tick, so the first lookup of a tick is remembered by the command's pointer
-// (path string address or hash) and cleared at the next tick (ClearResourceLookupCache, called
-// where soh's RunCommands resets mInterpolationIndex). Never staler than the uncached code.
-static std::unordered_map<const void*, void*> sRawByName;
+// per interpolated frame (~26% of the Quest game thread in Hyrule Field). Lookups are remembered
+// by the command's pointer (path string address or hash) and dropped whenever the resource
+// manager's cache generation changes (any unload/replace, alt-asset toggle), checked at the start
+// of every Run() pass, so a remembered pointer can never outlive the resource it points to.
+// Entries keyed by string ADDRESS also store the path text and are verified with strcmp on hit:
+// some path strings live in reused buffers (the message font writes each glyph's path into
+// fixed slots), so the same address can name a different resource later. Hash keys are
+// content-derived and need no check.
+struct NamedRaw {
+    std::string path;
+    void* ptr;
+};
+struct NamedRes {
+    std::string path;
+    std::shared_ptr<Ship::IResource> res;
+};
+static std::unordered_map<const void*, NamedRaw> sRawByName;
 static std::unordered_map<uint64_t, void*> sRawByHash;
-static std::unordered_map<const void*, std::shared_ptr<Ship::IResource>> sProcessByName;
+static std::unordered_map<const void*, NamedRes> sProcessByName;
 
 static void* CachedResourceRawPointer(const char* name) {
     auto it = sRawByName.find(name);
-    if (it != sRawByName.end()) {
-        return it->second;
+    if (it != sRawByName.end() && strcmp(it->second.path.c_str(), name) == 0) {
+        return it->second.ptr;
     }
     void* p = Ship::Context::GetRawInstance()->GetResourceManager()->GetResourceRawPointer(name);
     if (p != nullptr) {
-        sRawByName.emplace(name, p);
+        sRawByName[name] = NamedRaw{ name, p };
+    } else if (it != sRawByName.end()) {
+        sRawByName.erase(it);
     }
     return p;
 }
@@ -163,12 +177,14 @@ static void* CachedResourceRawPointer(uint64_t hash) {
 
 static std::shared_ptr<Ship::IResource> CachedLoadResourceProcess(const char* name) {
     auto it = sProcessByName.find(name);
-    if (it != sProcessByName.end()) {
-        return it->second;
+    if (it != sProcessByName.end() && strcmp(it->second.path.c_str(), name) == 0) {
+        return it->second.res;
     }
     std::shared_ptr<Ship::IResource> r = Ship::Context::GetRawInstance()->GetResourceManager()->LoadResourceProcess(name);
     if (r != nullptr) {
-        sProcessByName.emplace(name, r);
+        sProcessByName[name] = NamedRes{ name, r };
+    } else if (it != sProcessByName.end()) {
+        sProcessByName.erase(it);
     }
     return r;
 }
@@ -177,6 +193,16 @@ void Interpreter::ClearResourceLookupCache() {
     sRawByName.clear();
     sRawByHash.clear();
     sProcessByName.clear();
+}
+
+static void ValidateResourceLookupCache() {
+    static uint64_t sGeneration = ~0ull;
+    const uint64_t gen = Ship::Context::GetRawInstance()->GetResourceManager()->GetCacheGeneration();
+    // Also bound growth: scenes keep adding stable path pointers.
+    if (gen != sGeneration || sRawByName.size() + sRawByHash.size() + sProcessByName.size() > 60000) {
+        Interpreter::ClearResourceLookupCache();
+        sGeneration = gen;
+    }
 }
 // Set a cached pointer to the instance so we don't need to go through the window every time
 void GfxSetInstance(std::shared_ptr<Interpreter> gfx) {
@@ -5213,6 +5239,7 @@ void Interpreter::RunGuiOnly() {
 
 void Interpreter::Run(Gfx* commands, const std::unordered_map<Mtx*, MtxF>& mtx_replacements) {
     SpReset();
+    ValidateResourceLookupCache(); // QuestShip
 
     mGetPixelDepthPending.clear();
     mGetPixelDepthCached.clear();
