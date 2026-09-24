@@ -383,6 +383,8 @@ class Interpreter {
               uint32_t width, uint32_t height, uint32_t posX, uint32_t posY);
     void Destroy();
     void SetGfxDebugger(std::shared_ptr<GfxDebugger> debugger);
+    // QuestShip: drop the per-tick resource lookup cache (call at each new game tick).
+    static void ClearResourceLookupCache();
     std::shared_ptr<GfxDebugger> GetGfxDebugger() const;
     void GetDimensions(uint32_t* width, uint32_t* height, int32_t* posX, int32_t* posY);
     GfxRenderingAPI* GetCurrentRenderingAPI();

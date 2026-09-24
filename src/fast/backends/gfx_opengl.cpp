@@ -19,6 +19,8 @@
 #endif
 
 #include "fast/backends/gfx_opengl.h"
+#include <cstring>
+#include "libultraship/bridge/consolevariablebridge.h"
 #include "ship/window/gui/Gui.h"
 #include <prism/processor.h>
 #include <fstream>
@@ -554,6 +556,7 @@ GLuint GfxRenderingAPIOGL::NewTexture() {
     GLuint ret;
     glGenTextures(1, &ret);
     textures.resize(std::max(textures.size(), (size_t)ret + 1));
+    textures[ret].mipmapped = false; // a recycled id must not inherit the old texture's mips
     return ret;
 }
 
@@ -581,6 +584,14 @@ void GfxRenderingAPIOGL::UploadTexture(const uint8_t* rgba32_buf, uint32_t width
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba32_buf);
     textures[mCurrentTextureIds[mCurrentTile]].width = width;
     textures[mCurrentTextureIds[mCurrentTile]].height = height;
+    // QuestShip: mipmaps. Without them, distant textures (HD packs especially) shimmer and crawl
+    // as the head moves. Built once per upload on the GPU; sampling picks them up in
+    // SetSamplerParameters. Framebuffer textures never pass through here, so they stay unmipped.
+    const bool mips = CVarGetInteger("gTextureMipmaps", 1) != 0 && width > 1 && height > 1;
+    if (mips) {
+        glGenerateMipmap(GL_TEXTURE_2D);
+    }
+    textures[mCurrentTextureIds[mCurrentTile]].mipmapped = mips;
 }
 
 #ifdef USE_OPENGLES
@@ -607,8 +618,18 @@ void GfxRenderingAPIOGL::SetSamplerParameters(int tile, bool linear_filter, uint
         glActiveTexture(GL_TEXTURE0 + tile);
     }
     const GLint filter = linear_filter && mCurrentFilterMode == FILTER_LINEAR ? GL_LINEAR : GL_NEAREST;
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+    // QuestShip: mipmapped textures minify through their mip chain (trilinear for Linear; for
+    // point/Three-Point, nearest texel within linearly blended levels, so the N64-style shader
+    // filter is unchanged up close). Anisotropy keeps floors sharp at grazing angles.
+    const bool mipped = mCurrentTextureIds[tile] < textures.size() && textures[mCurrentTextureIds[tile]].mipmapped;
+    const GLint minFilter =
+        !mipped ? filter : (filter == GL_LINEAR ? GL_LINEAR_MIPMAP_LINEAR : GL_NEAREST_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, minFilter);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
+    if (mipped && mMaxAnisotropy > 1.0f) {
+        const float aniso = std::min((float)CVarGetInteger("gTextureAnisotropy", 4), mMaxAnisotropy);
+        glTexParameterf(GL_TEXTURE_2D, 0x84FE /* GL_TEXTURE_MAX_ANISOTROPY_EXT */, std::max(aniso, 1.0f));
+    }
     textures[mCurrentTextureIds[tile]].filtering = !linear_filter ? FILTER_LINEAR : FILTER_THREE_POINT;
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, gfx_cm_to_opengl(cms));
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, gfx_cm_to_opengl(cmt));
@@ -703,6 +724,9 @@ void GfxRenderingAPIOGL::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, size
     SetPerDrawUniforms();
 
     // printf("flushing %d tris\n", buf_vbo_num_tris);
+    // QuestShip note: a ring buffer with per-draw glMapBufferRange(UNSYNCHRONIZED) was tried
+    // (OOT_16) and was SLOWER on Quest: each map/unmap made the Adreno driver submit its command
+    // buffer (gsl_command_issueib_sync). Keep the plain per-draw upload.
     glBufferData(GL_ARRAY_BUFFER, sizeof(float) * buf_vbo_len, buf_vbo, GL_STREAM_DRAW);
     glDrawArrays(GL_TRIANGLES, 0, 3 * buf_vbo_num_tris);
 }
@@ -741,6 +765,14 @@ void GfxRenderingAPIOGL::Init() {
     mPixelDepthRbSize = 1;
 
     glGetIntegerv(GL_MAX_SAMPLES, &mMaxMsaaLevel);
+
+    // QuestShip: anisotropic filtering support (used for mipmapped textures).
+    {
+        const char* ext = reinterpret_cast<const char*>(glGetString(GL_EXTENSIONS));
+        if (ext != nullptr && strstr(ext, "GL_EXT_texture_filter_anisotropic") != nullptr) {
+            glGetFloatv(0x84FF /* GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT */, &mMaxAnisotropy);
+        }
+    }
 }
 
 void GfxRenderingAPIOGL::OnResize() {
