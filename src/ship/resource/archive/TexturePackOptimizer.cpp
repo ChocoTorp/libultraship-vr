@@ -43,8 +43,10 @@ constexpr uint32_t kFlagAstc = 4;
 constexpr uint32_t kBlock = 4;         // ASTC 4x4
 constexpr uint32_t kMinSide = 64;      // smaller textures gain little
 constexpr double kMinPsnr = 36.0;      // below this the original keeps serving the texture
-constexpr unsigned kWorkers = 3;       // leave the game thread and the driver their cores
-constexpr size_t kMaxInFlight = 12;    // bounds memory: at most this many textures decoded at once
+constexpr unsigned kWorkers = 2;       // leave the game thread and the driver their cores
+constexpr size_t kMaxInFlight = 2;     // textures read ahead of the workers
+constexpr size_t kMaxBytesInFlight = 48u << 20; // bounds memory: RGBA bytes read but not yet converted
+constexpr int kStartDelayS = 30;       // let the game finish loading before competing for memory
 
 std::atomic<int> sState{ 0 }; // 0 idle, 1 running, 2 done, 3 failed
 std::atomic<size_t> sDone{ 0 }, sTotal{ 0 }, sWritten{ 0 };
@@ -377,6 +379,8 @@ void Run(std::string modsDir, std::vector<std::string> mods) {
 #ifdef __ANDROID__
     setpriority(PRIO_PROCESS, gettid(), 10); // background: the game thread always wins
 #endif
+    // Starting while the game is still loading pushed the app over the Quest's memory limit.
+    std::this_thread::sleep_for(std::chrono::seconds(kStartDelayS));
     const auto t0 = std::chrono::steady_clock::now();
     const std::string fingerprint = Fingerprint(modsDir);
 
@@ -422,6 +426,7 @@ void Run(std::string modsDir, std::vector<std::string> mods) {
     std::mutex m;
     std::condition_variable cv;
     std::deque<Job> queue;
+    size_t bytesInFlight = 0; // file bytes read and not yet converted (queued + in the workers)
     bool producerDone = false;
 
     auto worker = [&]() {
@@ -445,12 +450,18 @@ void Run(std::string modsDir, std::vector<std::string> mods) {
                 queue.pop_front();
             }
             cv.notify_all();
+            const size_t jobBytes = job.file.size();
             std::vector<uint8_t> out = ctxOk ? Convert(job, ctx) : std::vector<uint8_t>{};
-            if (!out.empty()) {
+            job.file = {};
+            {
                 std::lock_guard<std::mutex> lock(m);
-                zipOut.Add(job.path, out);
-                sWritten++;
+                if (!out.empty()) {
+                    zipOut.Add(job.path, out);
+                    sWritten++;
+                }
+                bytesInFlight -= jobBytes;
             }
+            cv.notify_all();
             sDone++;
         }
         if (ctx) {
@@ -484,7 +495,13 @@ void Run(std::string modsDir, std::vector<std::string> mods) {
                 continue;
             }
             std::unique_lock<std::mutex> lock(m);
-            cv.wait(lock, [&] { return queue.size() < kMaxInFlight; });
+            // Wait for room: few queued, and a byte budget (one oversized texture may still pass
+            // alone, when nothing else is in flight).
+            cv.wait(lock, [&] {
+                return queue.size() < kMaxInFlight &&
+                       (bytesInFlight == 0 || bytesInFlight + job.file.size() <= kMaxBytesInFlight);
+            });
+            bytesInFlight += job.file.size();
             queue.push_back(std::move(job));
             lock.unlock();
             cv.notify_all();
