@@ -12,6 +12,8 @@ bool VR_IsInitialized();
 // BEFORE building the tick's display list, so a DL built for one mode is never drawn in the other.
 void VR_ApplyModeRequest(void);
 void VR_SetOverlayDisplayList(void* commands);
+// QuestShip: scene transition fade color + alpha (0..255) applied to the whole view.
+void VR_SetTransitionFade(uint8_t r, uint8_t g, uint8_t b, uint8_t a);
 
 // Bracket the game's fixed-timestep logic update so the VR performance readout can separate it
 // from render cost. Game logic runs once per 20 Hz tick on the same thread as the render passes,

@@ -195,6 +195,9 @@ void vr_rebind_current_eye_target();
 
 // HUD overlay (rendered to a separate quad layer in front of the user)
 void vr_set_hud_commands(void* commands);
+// QuestShip: scene-transition fade (color 0..1, alpha 0..1) applied to the whole view at the
+// compositor.
+void vr_set_transition_fade(float r, float g, float b, float a);
 void* vr_get_hud_commands();
 void vr_begin_hud();
 void vr_end_hud();

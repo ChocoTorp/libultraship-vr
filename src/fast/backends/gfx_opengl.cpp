@@ -686,6 +686,10 @@ void GfxRenderingAPIOGL::UploadTexture(const uint8_t* rgba32_buf, uint32_t width
     // small tiles, often re-uploaded) gain nothing from a chain, so they skip it.
     const bool mips = CVarGetInteger("gTextureMipmaps", 1) != 0 && width >= 8 && height >= 8;
     if (mips) {
+        // MAX_LEVEL must be open BEFORE generating: a reused texture object may still carry
+        // MAX_LEVEL 0 from unmipped contents, and glGenerateMipmap only builds levels up to it,
+        // which left the chain missing, the texture incomplete, and it sampled black.
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 1000);
         glGenerateMipmap(GL_TEXTURE_2D);
     }
     FinishTextureUpload(info, mips);
@@ -700,10 +704,7 @@ void GfxRenderingAPIOGL::FinishTextureUpload(TextureInfo& info, bool mipmapped) 
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, mipmapped ? 1000 : 0);
     const GLint mag = info.magFilter != 0 ? info.magFilter : GL_NEAREST;
     const GLint minFilter = !mipmapped ? mag : (mag == GL_LINEAR ? GL_LINEAR_MIPMAP_LINEAR : GL_NEAREST_MIPMAP_LINEAR);
-    if (info.minFilter != minFilter) {
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, minFilter);
-        info.minFilter = minFilter;
-    }
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, minFilter);
 }
 
 #ifdef USE_OPENGLES
@@ -754,6 +755,12 @@ bool GfxRenderingAPIOGL::UploadCompressedTexture(uint32_t blockX, uint32_t block
     return true;
 }
 
+void GfxRenderingAPIOGL::SetMipmapsAllowed(int tile, bool allowed) {
+    if (tile >= 0 && tile < SHADER_MAX_TEXTURES) {
+        mMipsAllowed[tile] = allowed;
+    }
+}
+
 void GfxRenderingAPIOGL::SetSamplerParameters(int tile, bool linear_filter, uint32_t cms, uint32_t cmt) {
     if (mLastActiveTexture != tile) {
         mLastActiveTexture = tile;
@@ -767,32 +774,20 @@ void GfxRenderingAPIOGL::SetSamplerParameters(int tile, bool linear_filter, uint
         textures.resize(mCurrentTextureIds[tile] + 1);
     }
     TextureInfo& info = textures[mCurrentTextureIds[tile]];
-    const bool mipped = info.mipmapped;
+    const bool mipped = info.mipmapped && mMipsAllowed[tile];
     const GLint minFilter =
         !mipped ? filter : (filter == GL_LINEAR ? GL_LINEAR_MIPMAP_LINEAR : GL_NEAREST_MIPMAP_LINEAR);
-    // QuestShip: only touch what changed (texture parameters live in the texture object).
-    if (info.minFilter != minFilter) {
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, minFilter);
-        info.minFilter = minFilter;
-    }
-    if (info.magFilter != filter) {
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
-        info.magFilter = filter;
-    }
-    if (mipped && mMaxAnisotropy > 1.0f && info.aniso != mAnisotropy) {
+    // Always applied: the texture bound to this unit can differ from mCurrentTextureIds when other
+    // code binds textures directly, so a per-texture "already set" cache can go stale.
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, minFilter);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
+    info.magFilter = filter;
+    if (mipped && mMaxAnisotropy > 1.0f) {
         glTexParameterf(GL_TEXTURE_2D, 0x84FE /* GL_TEXTURE_MAX_ANISOTROPY_EXT */, mAnisotropy);
-        info.aniso = mAnisotropy;
     }
     info.filtering = !linear_filter ? FILTER_LINEAR : FILTER_THREE_POINT;
-    const GLint wrapS = gfx_cm_to_opengl(cms), wrapT = gfx_cm_to_opengl(cmt);
-    if (info.wrapS != wrapS) {
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrapS);
-        info.wrapS = wrapS;
-    }
-    if (info.wrapT != wrapT) {
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrapT);
-        info.wrapT = wrapT;
-    }
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, gfx_cm_to_opengl(cms));
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, gfx_cm_to_opengl(cmt));
 }
 
 void GfxRenderingAPIOGL::SetDepthTestAndMask(bool depth_test, bool z_upd) {
@@ -1034,7 +1029,7 @@ int GfxRenderingAPIOGL::CreateFramebuffer() {
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, 1, 1, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    textures[clrbuf].minFilter = textures[clrbuf].magFilter = GL_LINEAR;
+    textures[clrbuf].magFilter = GL_LINEAR;
     glBindTexture(GL_TEXTURE_2D, 0);
 
     GLuint clrbufMsaa;

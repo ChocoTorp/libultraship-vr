@@ -72,10 +72,7 @@ struct TextureInfo {
     uint16_t height = 0;
     uint16_t filtering = 0;
     bool mipmapped = false; // QuestShip: has a mip chain (generated on upload, or prebuilt ASTC)
-    // QuestShip: sampler state last set on this texture object (0 = unknown), so repeated
-    // SetSamplerParameters calls with the same values skip the glTexParameter calls.
-    GLint minFilter = 0, magFilter = 0, wrapS = 0, wrapT = 0;
-    float aniso = 0.0f;
+    GLint magFilter = 0; // QuestShip: last MAG filter set, reused for MIN at upload
 };
 
 class GfxRenderingAPIOGL final : public GfxRenderingAPI {
@@ -96,6 +93,7 @@ class GfxRenderingAPIOGL final : public GfxRenderingAPI {
     bool UploadCompressedTexture(uint32_t blockX, uint32_t blockY, uint32_t levelCount, const uint32_t* widths,
                                  const uint32_t* heights, const uint8_t* const* data, const uint32_t* sizes) override;
     void SetSamplerParameters(int sampler, bool linear_filter, uint32_t cms, uint32_t cmt) override;
+    void SetMipmapsAllowed(int sampler, bool allowed) override;
     void SetDepthTestAndMask(bool depth_test, bool z_upd) override;
     void SetCurrentPrimDepth(float depth) override;
     void SetZmodeDecal(bool decal) override;
@@ -169,6 +167,7 @@ class GfxRenderingAPIOGL final : public GfxRenderingAPI {
     float mMaxAnisotropy = 0.0f; // QuestShip: 0 = EXT_texture_filter_anisotropic unavailable
     float mAnisotropy = 1.0f;    // gTextureAnisotropy, clamped, read once per frame
     GLint mMaxTextureSize = 0;   // cached GL_MAX_TEXTURE_SIZE
+    bool mMipsAllowed[SHADER_MAX_TEXTURES] = { true, true, true, true, true, true };
     void FinishTextureUpload(TextureInfo& info, bool mipmapped);
     bool mAstcSupported = false;  // QuestShip: GL_KHR_texture_compression_astc_ldr
 

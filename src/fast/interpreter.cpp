@@ -620,6 +620,7 @@ bool Interpreter::TextureCacheLookup(int i, const TextureCacheKey& key) {
     node->second.lru_location = mTextureCache.lru.insert(mTextureCache.lru.end(), { it });
 
     mRapi->SelectTexture(i, texture_id);
+    mRapi->SetMipmapsAllowed(i, true);
     mRapi->SetSamplerParameters(i, false, 0, 0);
     *n = node;
     return false;
@@ -2292,16 +2293,24 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
             }
 
             bool linear_filter = (mRdp->other_mode_h & (3U << G_MDSFT_TEXTFILT)) != G_TF_POINT;
+            // QuestShip: the shader clamps this texture to a sub-tile of what was uploaded, so its
+            // smaller mips would mix in texels from outside the tile: sample level 0 only.
+            // Experimental (gTextureClampNoMips, default off): Morgan saw sky chunks drop out with it.
+            const bool mips_allowed = !CVarGetInteger("gTextureClampNoMips", 0) || (tm & (3u << (2 * i))) == 0;
             if (linear_filter != mRenderingState.mTextures[i]->second.linear_filter ||
-                cms != mRenderingState.mTextures[i]->second.cms || cmt != mRenderingState.mTextures[i]->second.cmt) {
+                cms != mRenderingState.mTextures[i]->second.cms || cmt != mRenderingState.mTextures[i]->second.cmt ||
+                mips_allowed != mRenderingState.mTextures[i]->second.mips_allowed) {
                 Flush();
 
                 // Set the same sampler params on the blended texture. Needed for opengl.
                 if (mRdp->loaded_texture[i].blended) {
+                    mRapi->SetMipmapsAllowed(SHADER_FIRST_REPLACEMENT_TEXTURE + i, mips_allowed);
                     mRapi->SetSamplerParameters(SHADER_FIRST_REPLACEMENT_TEXTURE + i, linear_filter, cms, cmt);
                 }
 
+                mRapi->SetMipmapsAllowed(i, mips_allowed);
                 mRapi->SetSamplerParameters(i, linear_filter, cms, cmt);
+                mRenderingState.mTextures[i]->second.mips_allowed = mips_allowed;
                 mRenderingState.mTextures[i]->second.linear_filter = linear_filter;
                 mRenderingState.mTextures[i]->second.cms = cms;
                 mRenderingState.mTextures[i]->second.cmt = cmt;
@@ -2724,10 +2733,6 @@ void Interpreter::GfxDpSetTile(uint8_t fmt, uint32_t siz, uint32_t line, uint32_
         cmt = G_TX_CLAMP;
     }
 
-    // QuestShip: display lists re-emit identical tile setups all the time; only a real change
-    // should force the next triangle to flush the batch and re-import its textures.
-    const auto before = mRdp->texture_tile[tile];
-
     mRdp->texture_tile[tile].palette = palette; // palette should set upper 4 bits of color index in 4b mode
     mRdp->texture_tile[tile].fmt = fmt;
     mRdp->texture_tile[tile].siz = siz;
@@ -2745,25 +2750,15 @@ void Interpreter::GfxDpSetTile(uint8_t fmt, uint32_t siz, uint32_t line, uint32_
     mRdp->texture_tile[tile].tmem_index =
         tmem != 0; // assume one texture is loaded at address 0 and another texture at any other address
 
-    const auto& after = mRdp->texture_tile[tile];
-    if (before.fmt != after.fmt || before.siz != after.siz || before.cms != after.cms || before.cmt != after.cmt ||
-        before.masks != after.masks || before.maskt != after.maskt || before.shifts != after.shifts ||
-        before.shiftt != after.shiftt || before.tmem != after.tmem || before.line_size_bytes != after.line_size_bytes ||
-        before.palette != after.palette || before.tmem_index != after.tmem_index) {
-        mRdp->textures_changed[0] = true;
-        mRdp->textures_changed[1] = true;
-    }
+    mRdp->textures_changed[0] = true;
+    mRdp->textures_changed[1] = true;
 }
 
 void Interpreter::GfxDpSetTileSize(uint8_t tile, uint16_t uls, uint16_t ult, uint16_t lrs, uint16_t lrt) {
-    auto& t = mRdp->texture_tile[tile];
-    if (t.uls == uls && t.ult == ult && t.lrs == lrs && t.lrt == lrt) {
-        return; // QuestShip: unchanged, keep the current batch and textures
-    }
-    t.uls = uls;
-    t.ult = ult;
-    t.lrs = lrs;
-    t.lrt = lrt;
+    mRdp->texture_tile[tile].uls = uls;
+    mRdp->texture_tile[tile].ult = ult;
+    mRdp->texture_tile[tile].lrs = lrs;
+    mRdp->texture_tile[tile].lrt = lrt;
     mRdp->textures_changed[0] = true;
     mRdp->textures_changed[1] = true;
 }

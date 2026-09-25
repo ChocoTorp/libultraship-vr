@@ -55,6 +55,11 @@ class GfxRenderingAPI {
         return false;
     }
     virtual void SetSamplerParameters(int sampler, bool linear_filter, uint32_t cms, uint32_t cmt) = 0;
+    // QuestShip: whether the next SetSamplerParameters for `sampler` may use the texture's mip
+    // chain. Off for textures drawn as a clamped sub-tile of a larger upload, whose smaller mips
+    // would blend in texels from outside the tile (visible as dark seams, e.g. the skybox).
+    virtual void SetMipmapsAllowed(int sampler, bool allowed) {
+    }
     virtual void SetDepthTestAndMask(bool depth_test, bool z_upd) = 0;
     virtual void SetZmodeDecal(bool decal) = 0;
     virtual void SetViewport(int x, int y, int width, int height) = 0;

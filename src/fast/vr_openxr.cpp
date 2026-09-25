@@ -328,6 +328,9 @@ static struct {
     bool color_scale_supported;
     float view_fade_target;
     float view_fade_current;
+    // QuestShip: scene-transition fade (game's fade color and alpha, 0..1), applied to the whole
+    // view at the compositor instead of showing the flat panel.
+    float trans_fade[4];
 } xr = {};
 
 static void vr_restore_eye_dimensions() {
@@ -2071,7 +2074,8 @@ bool vr_begin_frame() {
         const float dx = p1.x - p0.x, dy = p1.y - p0.y, dz = p1.z - p0.z;
         const float halfIpd = 0.5f * sqrtf(dx * dx + dy * dy + dz * dz);
         const float minTan = fmaxf(fminf(tanf(-uf.angleLeft), tanf(uf.angleRight)), 0.1f);
-        const float back = halfIpd / minTan; // meters along the view's +Z (behind the eyes)
+        // gVrCullPullback (default on) can be switched off in the menu for A/B testing.
+        const float back = CVarGetInteger("gVrCullPullback", 1) ? halfIpd / minTan : 0.0f; // meters, view +Z
         const XrQuaternionf& q = cp.orientation;
         // +Z axis of the orientation: q * (0, 0, 1)
         const float bx = 2.0f * (q.x * q.z + q.w * q.y);
@@ -2122,13 +2126,24 @@ void vr_end_frame() {
         } else {
             xr.view_fade_current = fmaxf(xr.view_fade_current - step, xr.view_fade_target);
         }
-        if (xr.color_scale_supported && xr.view_fade_current > 0.001f) {
-            const float s = 1.0f - xr.view_fade_current;
+        // Scene transition (fade to black/white): out = in * (1 - a) + color * a, on top of the
+        // in-wall darkening.
+        const float ta = xr.trans_fade[3];
+        if (xr.color_scale_supported && (xr.view_fade_current > 0.001f || ta > 0.001f)) {
+            const float s = (1.0f - xr.view_fade_current) * (1.0f - ta);
             color_scale.colorScale = { s, s, s, 1.0f };
-            color_scale.colorBias = { 0.0f, 0.0f, 0.0f, 0.0f };
+            color_scale.colorBias = { xr.trans_fade[0] * ta, xr.trans_fade[1] * ta, xr.trans_fade[2] * ta, 0.0f };
             color_scale.next = nullptr;
             projection_layer.next = &color_scale;
         }
+    }
+    // HUD quads fade with the transition too (not with the in-wall darkening).
+    XrCompositionLayerColorScaleBiasKHR hud_fade = { XR_TYPE_COMPOSITION_LAYER_COLOR_SCALE_BIAS_KHR };
+    const bool hud_faded = xr.color_scale_supported && xr.trans_fade[3] > 0.001f;
+    if (hud_faded) {
+        const float ta = xr.trans_fade[3];
+        hud_fade.colorScale = { 1.0f - ta, 1.0f - ta, 1.0f - ta, 1.0f - ta };
+        hud_fade.colorBias = { 0.0f, 0.0f, 0.0f, 0.0f };
     }
 
     // HUD quad layer (alpha-blended). Attachment via gVrHudAttach: 0 = head-locked (classic),
@@ -2179,6 +2194,9 @@ void vr_end_frame() {
         hud_width = 0.05f;
     }
     hud_layer.size = { hud_width, hud_width * 0.75f }; // 4:3, matching the HUD swapchain
+    if (hud_faded) {
+        hud_layer.next = &hud_fade;
+    }
 
     // Flat-screen quad (world-locked panel with the whole 2D frame: file select, pause menu)
     XrCompositionLayerQuad screen_layer = { XR_TYPE_COMPOSITION_LAYER_QUAD };
@@ -3038,17 +3056,18 @@ bool vr_lookup_hand_matrix(const void* mtx, float out[4][4]) {
             if (!vr_get_hand_matrix(it->second, out)) {
                 return false;
             }
-            // QuestShip: shrink the hand MESH only (not held items, which use the plain hand
-            // matrix), scaling around the palm so the palm stays on the grip point.
-            const float k = g_hc.meshScale;
-            if (k != 1.0f && g_hand_mesh_scaled[it->second]) {
+            // QuestShip: EMPTY hands (open/closed fist meshes, flagged by the game) are centered on
+            // the controller grip: the palm, not the wrist joint, sits on the grip point, and the
+            // mesh is scaled around it. Hands holding a weapon keep the wrist-origin frame so the
+            // sword pivots at the wrist. Held items use the plain hand matrix either way.
+            if (g_hand_mesh_scaled[it->second]) {
+                const float k = g_hc.meshScale;
                 const glm::vec3& palm = g_hc.palm;
                 glm::mat4 h;
                 for (int r = 0; r < 4; r++)
                     for (int c = 0; c < 4; c++)
                         h[r][c] = out[r][c];
-                h = h * glm::translate(glm::mat4(1.0f), palm) * glm::scale(glm::mat4(1.0f), glm::vec3(k)) *
-                    glm::translate(glm::mat4(1.0f), -palm);
+                h = h * glm::scale(glm::mat4(1.0f), glm::vec3(k)) * glm::translate(glm::mat4(1.0f), -palm);
                 for (int r = 0; r < 4; r++)
                     for (int c = 0; c < 4; c++)
                         out[r][c] = h[r][c];
@@ -3159,6 +3178,12 @@ void vr_rebind_current_eye_target() {
 // --------------------------------------------------------------------------
 
 void vr_set_hud_commands(void* commands) { xr.hud_commands = commands; }
+void vr_set_transition_fade(float r, float g, float b, float a) {
+    xr.trans_fade[0] = r;
+    xr.trans_fade[1] = g;
+    xr.trans_fade[2] = b;
+    xr.trans_fade[3] = fminf(fmaxf(a, 0.0f), 1.0f);
+}
 void* vr_get_hud_commands() { return xr.hud_commands; }
 
 void vr_begin_hud() {
@@ -3392,6 +3417,7 @@ void vr_recenter_heading(int16_t) {}
 void vr_set_interp_alpha(float) {}
 void vr_rebind_current_eye_target() {}
 void vr_set_hud_commands(void*) {}
+void vr_set_transition_fade(float, float, float, float) {}
 void* vr_get_hud_commands() { return nullptr; }
 void vr_begin_hud() {}
 void vr_end_hud() {}

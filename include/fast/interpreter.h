@@ -202,6 +202,7 @@ struct TextureCacheValue {
     uint32_t texture_id;
     uint8_t cms, cmt;
     bool linear_filter;
+    bool mips_allowed = true; // QuestShip: see GfxSpTri1 (shader-clamped sub-tiles sample level 0 only)
 
     std::list<struct TextureCacheMapIter>::iterator lru_location;
 };

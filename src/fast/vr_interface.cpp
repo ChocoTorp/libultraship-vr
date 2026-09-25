@@ -44,6 +44,10 @@ void VR_SetOverlayDisplayList(void* commands) {
     vr_set_hud_commands(commands);
 }
 
+void VR_SetTransitionFade(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
+    vr_set_transition_fade(r / 255.0f, g / 255.0f, b / 255.0f, a / 255.0f);
+}
+
 void VR_SetLinkEyeHeight(float units) {
     vr_set_link_eye_height(units);
 }
