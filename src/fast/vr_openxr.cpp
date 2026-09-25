@@ -1609,13 +1609,14 @@ void vr_menu_set_open(bool open) {
     xr.ptr_wheel = 0.0f;
 }
 
-// QuestShip: which controller button opens the settings menu (gVrMenuButton):
-// 0 left menu, 1 left stick click, 2 right stick click, 3 X, 4 Y, 5 A, 6 B.
+// QuestShip: the left menu button (hamburger) always opens the settings menu. gVrMenuButton adds
+// an optional second button: 0 none, 1 left stick click, 2 right stick click, 3 X, 4 Y, 5 A, 6 B.
+// hand = -1 when there is none.
 static void vr_menu_button(int& hand, uint16_t& mask) {
     static const struct {
         int hand;
         uint16_t mask;
-    } kButtons[] = { { 0, 1 << 5 }, { 0, 1 << 4 }, { 1, 1 << 4 }, { 0, 1 << 2 },
+    } kButtons[] = { { -1, 0 },     { 0, 1 << 4 }, { 1, 1 << 4 }, { 0, 1 << 2 },
                      { 0, 1 << 3 }, { 1, 1 << 2 }, { 1, 1 << 3 } };
     int i = CVarGetInteger("gVrMenuButton", 0);
     if (i < 0 || i >= (int)(sizeof(kButtons) / sizeof(kButtons[0]))) {
@@ -1629,12 +1630,13 @@ static void vr_menu_update() {
     if (!xr.input_initialized) {
         return;
     }
-    // The settings-menu button (left menu by default, gVrMenuButton) toggles the menu on every
-    // press. It never reaches the game while it is the menu button.
+    // The hamburger (and the optional extra button, gVrMenuButton) toggles the menu on every
+    // press. Neither reaches the game.
     int menuHand;
     uint16_t menuMask;
     vr_menu_button(menuHand, menuMask);
-    const bool btn = (xr.buttons[menuHand] & menuMask) != 0;
+    const bool btn = (xr.buttons[0] & (1 << 5)) != 0 || // hamburger, left controller
+                     (menuHand >= 0 && (xr.buttons[menuHand] & menuMask) != 0);
     if (btn && !xr.menu_btn_prev) {
         vr_menu_set_open(!xr.menu_open);
         vr_trigger_haptic(0, 0.5f, 0.0f, 40.0f);
@@ -1720,7 +1722,8 @@ bool vr_menu_consumes_button(int hand, uint16_t mask) {
     int menuHand;
     uint16_t menuMask;
     vr_menu_button(menuHand, menuMask);
-    return hand == menuHand && (mask & menuMask) != 0; // the settings-menu button never reaches the game
+    // The hamburger and the optional extra menu button never reach the game.
+    return (hand == 0 && (mask & (1 << 5)) != 0) || (hand == menuHand && (mask & menuMask) != 0);
 }
 
 void vr_begin_menu() {
