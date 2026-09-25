@@ -60,6 +60,9 @@ class GfxRenderingAPI {
     // would blend in texels from outside the tile (visible as dark seams, e.g. the skybox).
     virtual void SetMipmapsAllowed(int sampler, bool allowed) {
     }
+    // QuestShip: blend the following draws at this constant opacity (1 = off), no depth writes.
+    virtual void SetGlobalAlpha(float alpha) {
+    }
     virtual void SetDepthTestAndMask(bool depth_test, bool z_upd) = 0;
     virtual void SetZmodeDecal(bool decal) = 0;
     virtual void SetViewport(int x, int y, int width, int height) = 0;

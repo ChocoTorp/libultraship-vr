@@ -92,6 +92,12 @@ endif()
 find_package(libzip REQUIRED)
 target_link_libraries(libultraship PRIVATE libzip::zip)
 
+# QuestShip: on-device texture-pack optimizer (Android only; astc-encoder fetched in android.cmake).
+if (CMAKE_SYSTEM_NAME STREQUAL "Android" AND TARGET astcenc-neon-static)
+    target_link_libraries(libultraship PRIVATE astcenc-neon-static z)
+    target_compile_definitions(libultraship PRIVATE QUESTSHIP_ASTC_OPTIMIZER)
+endif()
+
 find_package(nlohmann_json REQUIRED)
 target_link_libraries(libultraship PUBLIC nlohmann_json::nlohmann_json)
 

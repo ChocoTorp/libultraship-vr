@@ -2842,6 +2842,16 @@ typedef union Gfx {
 #define gsSPVrPhysMask(state) \
     { (_SHIFTL(G_VRPHYS_MASK, 24, 8)), (state) }
 
+// QuestShip: opacity for the following draws, 0..255 (255 = normal). See OTR_G_VRALPHA.
+#define G_VRALPHA 0x4c
+#define gSPVrAlpha(pkt, alpha)                         \
+    {                                                  \
+        Gfx* _g = (Gfx*)(pkt);                         \
+                                                       \
+        _g->words.w0 = _SHIFTL(G_VRALPHA, 24, 8);      \
+        _g->words.w1 = (alpha);                        \
+    }
+
 #define gsSPPushShader(shader)                                  \
     { (_SHIFTL(G_PUSH_SHADER, 24, 8)), (uintptr_t)(shader) }, { \
         0, 0                                                    \

@@ -94,6 +94,7 @@ class GfxRenderingAPIOGL final : public GfxRenderingAPI {
                                  const uint32_t* heights, const uint8_t* const* data, const uint32_t* sizes) override;
     void SetSamplerParameters(int sampler, bool linear_filter, uint32_t cms, uint32_t cmt) override;
     void SetMipmapsAllowed(int sampler, bool allowed) override;
+    void SetGlobalAlpha(float alpha) override;
     void SetDepthTestAndMask(bool depth_test, bool z_upd) override;
     void SetCurrentPrimDepth(float depth) override;
     void SetZmodeDecal(bool decal) override;
@@ -168,6 +169,9 @@ class GfxRenderingAPIOGL final : public GfxRenderingAPI {
     float mAnisotropy = 1.0f;    // gTextureAnisotropy, clamped, read once per frame
     GLint mMaxTextureSize = 0;   // cached GL_MAX_TEXTURE_SIZE
     bool mMipsAllowed[SHADER_MAX_TEXTURES] = { true, true, true, true, true, true };
+    float mGlobalAlpha = 1.0f;
+    bool mGlobalAlphaApplied = false;
+    bool mUseAlphaRequested = false;
     void FinishTextureUpload(TextureInfo& info, bool mipmapped);
     bool mAstcSupported = false;  // QuestShip: GL_KHR_texture_compression_astc_ldr
 

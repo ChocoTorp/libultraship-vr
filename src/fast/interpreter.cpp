@@ -4513,6 +4513,14 @@ bool gfx_vrphys_mask_handler_custom(F3DGfx** cmd0) {
     return false;
 }
 
+bool gfx_vralpha_handler_custom(F3DGfx** cmd0) {
+    Interpreter* gfx = sInstanceRaw;
+    F3DGfx* cmd = *cmd0;
+    gfx->Flush(); // the batch so far was built at the previous opacity
+    gfx->mRapi->SetGlobalAlpha((cmd->words.w1 & 0xFF) / 255.0f);
+    return false;
+}
+
 bool gfx_load_block_handler_rdp(F3DGfx** cmd0) {
     Interpreter* gfx = sInstanceRaw;
     F3DGfx* cmd = *cmd0;
@@ -4980,7 +4988,8 @@ static constexpr UcodeHandler otrHandlers = {
     { OTR_G_TEXRECT_WIDE, { "G_TEXRECT_WIDE", gfx_tex_rect_wide_handler_custom } },          // G_TEXRECT_WIDE (0x37)
     { OTR_G_FILLWIDERECT, { "G_FILLWIDERECT", gfx_fill_wide_rect_handler_custom } },         // G_FILLWIDERECT (0x38)
     { OTR_G_SETGRAYSCALE, { "G_SETGRAYSCALE", gfx_set_grayscale_handler_custom } },          // G_SETGRAYSCALE (0x39)
-    { OTR_G_VRPHYS_MASK, { "G_VRPHYS_MASK", gfx_vrphys_mask_handler_custom } },              // G_VRPHYS_MASK (0x4a)
+    { OTR_G_VRPHYS_MASK, { "G_VRPHYS_MASK", gfx_vrphys_mask_handler_custom } },              // G_VRPHYS_MASK (0x4b)
+    { OTR_G_VRALPHA, { "G_VRALPHA", gfx_vralpha_handler_custom } },                          // G_VRALPHA (0x4c)
     { OTR_G_EXTRAGEOMETRYMODE,
       { "G_EXTRAGEOMETRYMODE", gfx_extra_geometry_mode_handler_custom } }, // G_EXTRAGEOMETRYMODE (0x3a)
     { OTR_G_COPYFB, { "G_COPYFB", gfx_copy_fb_handler_custom } },          // G_COPYFB (0x3b)
@@ -5408,6 +5417,7 @@ void Interpreter::RunGuiOnly() {
 void Interpreter::Run(Gfx* commands, const std::unordered_map<Mtx*, MtxF>& mtx_replacements) {
     SpReset();
     ValidateResourceLookupCache(); // QuestShip
+    mRapi->SetGlobalAlpha(1.0f);   // QuestShip: a display list never inherits the last pass's G_VRALPHA
     // QuestShip: evict texture-cache entries keyed by destroyed ASTC textures' address ranges
     // before those ranges are released (and possibly reused by a new texture).
     Fast::Texture::DrainFreedSentinels([](const uint8_t* addr) { sInstanceRaw->TextureCacheDelete(addr); });

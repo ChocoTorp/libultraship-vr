@@ -814,7 +814,15 @@ void GfxRenderingAPIOGL::SetScissor(int x, int y, int width, int height) {
     glScissor(x, y, width, height);
 }
 
+void GfxRenderingAPIOGL::SetGlobalAlpha(float alpha) {
+    mGlobalAlpha = std::clamp(alpha, 0.0f, 1.0f);
+}
+
 void GfxRenderingAPIOGL::SetUseAlpha(bool use_alpha) {
+    mUseAlphaRequested = use_alpha;
+    if (mGlobalAlphaApplied) {
+        return; // constant-alpha blending owns GL_BLEND until it is switched off (DrawTriangles)
+    }
     int8_t val = use_alpha ? 1 : 0;
     if (mLastBlendEnabled != val) {
         mLastBlendEnabled = val;
@@ -827,9 +835,27 @@ void GfxRenderingAPIOGL::SetUseAlpha(bool use_alpha) {
 }
 
 void GfxRenderingAPIOGL::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, size_t buf_vbo_num_tris) {
-    if (mCurrentDepthTest != mLastDepthTest || mCurrentDepthMask != mLastDepthMask) {
+    // QuestShip: global opacity (G_VRALPHA). Constant-alpha blending over whatever is behind, and no
+    // depth writes so the scene behind stays visible; restored exactly when switched off.
+    const bool wantGlobalAlpha = mGlobalAlpha < 0.999f;
+    if (wantGlobalAlpha) {
+        if (!mGlobalAlphaApplied) {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_CONSTANT_ALPHA, GL_ONE_MINUS_CONSTANT_ALPHA);
+            mGlobalAlphaApplied = true;
+        }
+        glBlendColor(0.0f, 0.0f, 0.0f, mGlobalAlpha);
+    } else if (mGlobalAlphaApplied) {
+        mGlobalAlphaApplied = false;
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        mLastBlendEnabled = -1;
+        SetUseAlpha(mUseAlphaRequested);
+        mLastDepthMask = -1; // force the depth state below to be re-sent
+    }
+    const int8_t depthMask = wantGlobalAlpha ? 0 : mCurrentDepthMask; // translucent: no depth writes
+    if (mCurrentDepthTest != mLastDepthTest || depthMask != mLastDepthMask) {
         mLastDepthTest = mCurrentDepthTest;
-        mLastDepthMask = mCurrentDepthMask;
+        mLastDepthMask = depthMask;
 
         if (mCurrentDepthTest || mLastDepthMask) {
             glEnable(GL_DEPTH_TEST);

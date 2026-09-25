@@ -82,3 +82,19 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(glm)
 list(APPEND ADDITIONAL_LIB_INCLUDES ${glm_SOURCE_DIR})
+
+#=================== astc-encoder (QuestShip: on-device texture-pack optimizer) ===================
+# Arm's ASTC compressor as a static library (NEON), used by TexturePackOptimizer to convert
+# installed HD texture packs to ASTC in the background.
+set(ASTCENC_ISA_NEON ON CACHE BOOL "" FORCE)
+set(ASTCENC_CLI OFF CACHE BOOL "" FORCE)
+set(ASTCENC_UNITTEST OFF CACHE BOOL "" FORCE)
+set(ASTCENC_SHAREDLIB OFF CACHE BOOL "" FORCE)
+set(ASTCENC_WERROR OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    astcenc
+    GIT_REPOSITORY https://github.com/ARM-software/astc-encoder.git
+    GIT_TAG 5.7.0
+)
+FetchContent_MakeAvailable(astcenc)
+list(APPEND ADDITIONAL_LIB_INCLUDES ${astcenc_SOURCE_DIR}/Source)

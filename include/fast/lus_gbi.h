@@ -80,6 +80,9 @@ constexpr int8_t RDP_G_TRI1_WIDE = OPCODE(0x49);
 // scrolls textures (crash in the middle of Hyrule Field's grass).
 constexpr int8_t OTR_G_VRPHYS_MASK = OPCODE(0x4b);
 constexpr int8_t RDP_G_SETTILESIZE_LERP = OPCODE(0x4a);
+// QuestShip: global opacity for the draws that follow (w1 = 0..255, 255 = normal). Used to show a
+// solid model translucent (e.g. the Deku Nut preview when out of nuts).
+constexpr int8_t OTR_G_VRALPHA = OPCODE(0x4c);
 
 /*
  * The following commands are the "generated" RDP commands; the user
