@@ -230,7 +230,7 @@ bool Fast3dWindow::DrawAndRunGraphicsCommands(Gfx* commands, const std::unordere
     bool renderHud = true;
     bool presentDesktop = true;
     if (vr) {
-        const uint64_t stereoDivisor = (uint64_t)std::clamp(CVarGetInteger("gVrStereoDivisor", 1), 1, 4);
+        const uint64_t stereoDivisor = (uint64_t)std::clamp(CVarGetInteger("gVrStereoDivisor", 2), 1, 4);
         const uint64_t desktopDivisor = (uint64_t)std::clamp(CVarGetInteger("gVrDesktopViewDivisor", 4), 1, 32);
 
         // Redraw the stereo pair every Nth XR frame; the frames in between resubmit the previous
