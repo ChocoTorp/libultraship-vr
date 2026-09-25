@@ -44,7 +44,13 @@ std::shared_ptr<File> ArchiveManager::LoadFile(const std::string& filePath) {
         return nullptr;
     }
 
-    return LoadFile(CRC64(filePath.c_str()));
+    // QuestShip: load by path (the archive would otherwise map the hash back to a path through
+    // Context::GetRawInstance()->GetResourceManager(), which is gone during shutdown).
+    auto it = mFileToArchive.find(CRC64(filePath.c_str()));
+    if (it == mFileToArchive.end() || it->second == nullptr) {
+        return nullptr;
+    }
+    return it->second->LoadFile(filePath);
 }
 
 std::shared_ptr<File> ArchiveManager::LoadFile(uint64_t hash) {
@@ -59,6 +65,8 @@ std::shared_ptr<File> ArchiveManager::LoadFile(uint64_t hash) {
     return archive->LoadFile(hash);
 }
 
+// Note: mArchives / mFileToArchive are only modified while (re)initializing the archive set, never
+// while the game renders or the preloader runs, so the lock-free reads here are safe.
 std::shared_ptr<File> ArchiveManager::LoadFileFromLowerArchives(const std::string& filePath,
                                                                 std::shared_ptr<Archive>* fromArchive) {
     const uint64_t hash = CRC64(filePath.c_str());

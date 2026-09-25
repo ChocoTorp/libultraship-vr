@@ -48,6 +48,14 @@ struct ShaderProgram {
     ShaderProgram* mvTwin = nullptr;
     GLint vrViewProjLocation = -1;
     GLint vrWorldLocation = -1;
+    // QuestShip: last values uploaded to this program (uniforms live in the program object), so
+    // unchanged uniforms are not re-sent on every draw.
+    uint32_t sentFrameCount = UINT32_MAX;
+    float sentNoiseScale = -1.0f;
+    float sentPrimDepth = -1.0f;
+    uint32_t sentViewProjGen = 0;
+    int8_t sentWorld = -1;
+    GLint sentTex[6] = { -1, -1, -1, -1, -1, -1 }; // filtering[2], width[2], height[2]
 };
 
 struct FramebufferOGL {
@@ -60,10 +68,14 @@ struct FramebufferOGL {
 };
 
 struct TextureInfo {
-    uint16_t width;
-    uint16_t height;
-    uint16_t filtering;
-    bool mipmapped; // QuestShip: has a full mip chain (glGenerateMipmap on upload)
+    uint16_t width = 0;
+    uint16_t height = 0;
+    uint16_t filtering = 0;
+    bool mipmapped = false; // QuestShip: has a mip chain (generated on upload, or prebuilt ASTC)
+    // QuestShip: sampler state last set on this texture object (0 = unknown), so repeated
+    // SetSamplerParameters calls with the same values skip the glTexParameter calls.
+    GLint minFilter = 0, magFilter = 0, wrapS = 0, wrapT = 0;
+    float aniso = 0.0f;
 };
 
 class GfxRenderingAPIOGL final : public GfxRenderingAPI {
@@ -149,11 +161,15 @@ class GfxRenderingAPIOGL final : public GfxRenderingAPI {
     bool mMultiviewTarget = false;
     bool mStereoWorld = false;
     float mStereoViewProj[32] = {};
-    ShaderProgram* mCurrentShaderProgram;
+    uint32_t mStereoViewProjGen = 1; // bumped whenever mStereoViewProj changes
+    ShaderProgram* mCurrentShaderProgram = nullptr;
     ShaderProgram* mLastLoadedShader = nullptr;
 
     GLuint mOpenglVbo = 0;
     float mMaxAnisotropy = 0.0f; // QuestShip: 0 = EXT_texture_filter_anisotropic unavailable
+    float mAnisotropy = 1.0f;    // gTextureAnisotropy, clamped, read once per frame
+    GLint mMaxTextureSize = 0;   // cached GL_MAX_TEXTURE_SIZE
+    void FinishTextureUpload(TextureInfo& info, bool mipmapped);
     bool mAstcSupported = false;  // QuestShip: GL_KHR_texture_compression_astc_ldr
 
     // QuestShip: persistent-mapped vertex ring (EXT_buffer_storage), see DrawTriangles.

@@ -68,20 +68,33 @@ ResourceFactoryBinaryTextureV2::ReadResource(std::shared_ptr<Ship::File> file,
     texture->AstcBlockX = reader->ReadUInt32();
     texture->AstcBlockY = reader->ReadUInt32();
     const uint32_t levels = reader->ReadUInt32();
+    const size_t fileSize = file->Buffer->size();
+    if (levels == 0 || levels > 16) {
+        SPDLOG_ERROR("[ASTC] {}: bad level count {}", initData->Path, levels);
+        return nullptr;
+    }
     texture->mImageBuffer = file->Buffer;
     for (uint32_t l = 0; l < levels; l++) {
         Texture::AstcLevel level;
         level.Width = reader->ReadUInt32();
         level.Height = reader->ReadUInt32();
         level.Size = reader->ReadUInt32();
-        level.Data = reinterpret_cast<const uint8_t*>(file->Buffer->data() + reader->GetBaseAddress());
+        const size_t at = reader->GetBaseAddress();
+        const size_t blocks = (size_t)((level.Width + texture->AstcBlockX - 1) / texture->AstcBlockX) *
+                              ((level.Height + texture->AstcBlockY - 1) / texture->AstcBlockY);
+        // Bounds: the level must lie inside the file and be exactly its 16-byte-per-block size.
+        if (texture->AstcBlockX == 0 || texture->AstcBlockY == 0 || level.Width == 0 || level.Height == 0 ||
+            level.Size != blocks * 16 || at > fileSize || level.Size > fileSize - at) {
+            SPDLOG_ERROR("[ASTC] {}: level {} is malformed ({}x{}, {} bytes)", initData->Path, l, level.Width,
+                         level.Height, level.Size);
+            return nullptr;
+        }
+        level.Data = reinterpret_cast<const uint8_t*>(file->Buffer->data() + at);
         reader->Seek(level.Size, Ship::SeekOffsetType::Current);
         texture->AstcLevels.push_back(level);
     }
-    if (texture->AstcLevels.empty()) {
-        return nullptr;
-    }
-    texture->IsAstc = (texture->Flags & TEX_FLAG_ASTC) != 0;
+    texture->IsAstc = true; // a v2 texture has no RGBA payload, whatever its flags say
+    texture->Flags |= TEX_FLAG_ASTC;
     texture->PixelWidth = texture->AstcLevels[0].Width;
     texture->PixelHeight = texture->AstcLevels[0].Height;
     // The RGBA byte size the renderer's address math expects (as if it were the v1 texture).

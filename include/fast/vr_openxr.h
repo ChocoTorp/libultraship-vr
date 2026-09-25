@@ -159,16 +159,15 @@ void vr_physical_to_world(const float in_m[3], float out[3]);
 void vr_register_space_matrix(const void* mtx, const float anchor_m[3], const float offset_units[3],
                               const float* model_mf16, float spin_deg_per_s);
 
-// QuestShip: in-headset settings menu. Hold the LEFT menu button to toggle it; a quick tap is
-// delivered to the game as START on release (vr_take_start_tap). While open, the right (or left)
-// aim ray is a laser pointer on the panel and the menu owns every controller input.
+// QuestShip: in-headset settings menu. Each press of the LEFT menu button toggles it (the button is
+// never passed to the game). While open, the right (or left) aim ray is a laser pointer on the panel
+// and the menu owns every controller input.
 bool vr_menu_is_open();
 void vr_menu_set_open(bool open);
 bool vr_is_rendering_menu();
 void vr_menu_get_size(uint32_t* w, uint32_t* h);
 // Pointer in panel pixels; false when no ray hits the panel (down/wheel still reported).
 bool vr_menu_pointer(float* x, float* y, bool* down, float* wheel);
-bool vr_take_start_tap();
 bool vr_menu_consumes_button(int hand, uint16_t mask);
 void vr_begin_menu();
 void vr_end_menu();

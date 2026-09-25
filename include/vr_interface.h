@@ -109,6 +109,10 @@ void     VR_SetStickSuppressed(int hand, int32_t suppressed);
 bool     VR_GetAimRay(int hand, float pos[3], float dir[3]);
 bool     VR_IsHandActive(int hand);
 uint16_t VR_GetControllerButton(int hand);
+// QuestShip: buttons as GAMEPLAY sees them: 0 while the in-headset settings menu is open, so a menu
+// click can't also fire the bow, grab a nut or open the item compass. (Settings UI, e.g. button
+// binding capture, keeps using VR_GetControllerButton.)
+uint16_t VR_GetGameButtons(int hand);
 void     VR_GetThumbstick(int hand, float* x, float* y);
 float    VR_GetTrigger(int hand);
 float    VR_GetGrip(int hand);
@@ -288,11 +292,10 @@ bool     VR_GetHeadPosePhysical(float posM[3], float fwdFlat[3]);
 void     VR_PhysicalToWorld(const float inM[3], float out[3]);
 void     VR_RegisterSpaceMatrix(const void* mtx, const float anchorM[3], const float offsetUnits[3],
                                 const float* modelMf16, float spinDegPerS);
-// QuestShip: in-headset settings menu (hold left menu button). padmgr skips every VR input the
-// menu consumes and emits START once per quick tap of the left menu button.
+// QuestShip: in-headset settings menu (the left menu button toggles it). padmgr skips every VR
+// input the menu consumes while it is open.
 bool     VR_MenuIsOpen(void);
 bool     VR_MenuConsumesButton(int hand, uint16_t mask);
-bool     VR_TakeStartTap(void);
 
 #ifdef __cplusplus
 }

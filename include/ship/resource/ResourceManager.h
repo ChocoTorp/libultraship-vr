@@ -435,7 +435,7 @@ class ResourceManager {
     std::shared_ptr<ArchiveManager> mArchiveManager;
     std::shared_ptr<BS::thread_pool> mThreadPool;
     std::mutex mMutex;
-    bool mAltAssetsEnabled = false;
+    std::atomic<bool> mAltAssetsEnabled{ false }; // QuestShip: read by preload workers
     std::atomic<uint64_t> mCacheGeneration{ 0 };
     std::atomic<uint64_t> mPreloadGeneration{ 0 };
     // Private information for which owner and archive are default.

@@ -8,6 +8,7 @@
 #include "ship/resource/archive/ArchiveManager.h"
 
 #include "spdlog/spdlog.h"
+#include <algorithm>
 
 namespace Ship {
 OtrArchive::OtrArchive(const std::string& archivePath) : Archive(archivePath) {
@@ -23,32 +24,43 @@ static constexpr size_t kMaxMpqHandles = 4; // QuestShip: parallel readers per a
 HANDLE OtrArchive::AcquireHandle() {
     std::unique_lock<std::mutex> lock(mPoolMutex);
     for (;;) {
+        if (mClosing || mAllHandles.empty()) {
+            return nullptr;
+        }
         if (!mFreeHandles.empty()) {
             HANDLE h = mFreeHandles.back();
             mFreeHandles.pop_back();
             return h;
         }
-        if (mAllHandles.size() < kMaxMpqHandles) {
+        if (mAllHandles.size() + mOpening < kMaxMpqHandles && !mOpenFailed) {
+            // Open another independent handle OUTSIDE the lock (it reads the MPQ header and hash
+            // tables), skipping the listfile/attributes parse the first open already did.
+            mOpening++;
+            lock.unlock();
             HANDLE h = nullptr;
-            if (SFileOpenArchive(GetPath().c_str(), 0, MPQ_OPEN_READ_ONLY, &h)) {
+            const bool ok = SFileOpenArchive(GetPath().c_str(), 0,
+                                             MPQ_OPEN_READ_ONLY | MPQ_OPEN_NO_LISTFILE | MPQ_OPEN_NO_ATTRIBUTES, &h);
+            lock.lock();
+            mOpening--;
+            if (ok) {
                 mAllHandles.push_back(h);
                 return h;
             }
-            if (mAllHandles.empty()) {
-                return nullptr;
-            }
-            // Couldn't open another; wait for one to come back.
+            mOpenFailed = true; // don't retry per read; the existing handles are shared instead
         }
-        mPoolCv.wait(lock, [this] { return !mFreeHandles.empty(); });
+        mPoolCv.wait(lock, [this] { return !mFreeHandles.empty() || mClosing; });
     }
 }
 
 void OtrArchive::ReleaseHandle(HANDLE handle) {
     {
         std::lock_guard<std::mutex> lock(mPoolMutex);
+        if (std::find(mAllHandles.begin(), mAllHandles.end(), handle) == mAllHandles.end()) {
+            return; // not ours (the pool was closed and reset); never double-close
+        }
         mFreeHandles.push_back(handle);
     }
-    mPoolCv.notify_one();
+    mPoolCv.notify_all();
 }
 
 std::shared_ptr<File> OtrArchive::LoadFile(const std::string& filePath) {
@@ -80,6 +92,7 @@ std::shared_ptr<File> OtrArchive::LoadFile(const std::string& filePath) {
     DWORD fileSize = SFileGetFileSize(fileHandle, 0);
     if (fileSize == 0) {
         SPDLOG_TRACE("({}) Failed to load file {}; filesize 0", GetLastError(), filePath, GetPath());
+        SFileCloseFile(fileHandle);
         return nullptr;
     }
     DWORD readBytes;
@@ -146,7 +159,11 @@ bool OtrArchive::Open() {
 
 bool OtrArchive::Close() {
     bool closed = true;
-    std::lock_guard<std::mutex> lock(mPoolMutex);
+    std::unique_lock<std::mutex> lock(mPoolMutex);
+    // Wait for borrowed handles (reads in flight on the preload threads) to come back first.
+    mClosing = true;
+    mPoolCv.notify_all();
+    mPoolCv.wait(lock, [this] { return mOpening == 0 && mFreeHandles.size() == mAllHandles.size(); });
     for (HANDLE h : mAllHandles) {
         if (!SFileCloseArchive(h)) {
             SPDLOG_ERROR("({}) Failed to close mpq {}", GetLastError(), h);
@@ -156,6 +173,8 @@ bool OtrArchive::Close() {
     mAllHandles.clear();
     mFreeHandles.clear();
     mHandle = nullptr;
+    mClosing = false;
+    mOpenFailed = false;
     return closed;
 }
 

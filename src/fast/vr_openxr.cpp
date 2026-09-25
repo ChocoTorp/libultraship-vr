@@ -250,9 +250,6 @@ static struct {
     bool rendering_menu;
     XrPosef menu_pose; // local_space (raw), +Z faces the player
     bool menu_btn_prev;
-    bool menu_btn_used; // this press already toggled the menu (long hold)
-    std::chrono::steady_clock::time_point menu_btn_down_at;
-    bool start_tap_pending;
     bool ptr_hit;
     bool ptr_down;
     float ptr_x, ptr_y, ptr_wheel;
@@ -1691,12 +1688,6 @@ bool vr_menu_pointer(float* x, float* y, bool* down, float* wheel) {
     return xr.ptr_hit;
 }
 
-bool vr_take_start_tap() {
-    const bool t = xr.start_tap_pending;
-    xr.start_tap_pending = false;
-    return t;
-}
-
 bool vr_menu_consumes_button(int hand, uint16_t mask) {
     if (!xr.initialized || !xr.enabled) {
         return false;
@@ -1723,8 +1714,43 @@ void vr_end_menu() {
     vr_restore_eye_dimensions();
 }
 
+// QuestShip: hand-pose tuning CVars and the spin clock, read once per frame. The hand/space matrix
+// lookups run for every substituted G_MTX (per eye, per interpolated frame) and each CVar read is a
+// string-keyed map lookup.
+namespace {
+struct HandCvars {
+    int mirrorAxis = 2;
+    glm::vec3 calDeg{ 88.0f, -100.0f, 80.0f }, off{ 0.0f };
+    bool leftOverride = true;
+    glm::vec3 leftCalDeg{ -149.0f, 76.0f, 30.0f }, leftOff{ 0.0f };
+    float meshScale = 0.75f;
+    glm::vec3 palm{ 0.0f, 400.0f, 0.0f };
+    double timeS = 0.0; // seconds since start, for spinning space-locked models (same for both eyes)
+} g_hc;
+
+void refresh_hand_cvars() {
+    g_hc.mirrorAxis = CVarGetInteger("gVrHandMirrorAxis", 2);
+    if (g_hc.mirrorAxis < 0 || g_hc.mirrorAxis > 2) g_hc.mirrorAxis = 2;
+    g_hc.calDeg = glm::vec3(CVarGetFloat("gVrHandCalPitch", 88.0f), CVarGetFloat("gVrHandCalYaw", -100.0f),
+                            CVarGetFloat("gVrHandCalRoll", 80.0f));
+    g_hc.off = glm::vec3(CVarGetFloat("gVrHandOffX", 0.0f), CVarGetFloat("gVrHandOffY", 0.0f),
+                         CVarGetFloat("gVrHandOffZ", 0.0f));
+    g_hc.leftOverride = CVarGetInteger("gVrHandLOverride", 1) != 0;
+    g_hc.leftCalDeg = glm::vec3(CVarGetFloat("gVrHandLCalPitch", -149.0f), CVarGetFloat("gVrHandLCalYaw", 76.0f),
+                                CVarGetFloat("gVrHandLCalRoll", 30.0f));
+    g_hc.leftOff = glm::vec3(CVarGetFloat("gVrHandLOffX", 0.0f), CVarGetFloat("gVrHandLOffY", 0.0f),
+                             CVarGetFloat("gVrHandLOffZ", 0.0f));
+    g_hc.meshScale = CVarGetFloat("gVrHandMeshScale", 0.75f);
+    g_hc.palm = glm::vec3(CVarGetFloat("gVrHandPalmX", 0.0f), CVarGetFloat("gVrHandPalmY", 400.0f),
+                          CVarGetFloat("gVrHandPalmZ", 0.0f));
+    static const auto t0 = std::chrono::steady_clock::now();
+    g_hc.timeS = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+}
+} // namespace
+
 bool vr_begin_frame() {
     if (!xr.initialized || !xr.enabled) return false;
+    refresh_hand_cvars();
 
     poll_events();
 
@@ -2028,19 +2054,31 @@ bool vr_begin_frame() {
         build_projection_matrix(xr.views[eye].fov, xr.near_clip, xr.far_clip, xr.projection[eye]);
         pose_to_view_matrix(xr.views[eye].pose, xr.world_scale, xr.view[eye]);
     }
-    // QuestShip: center view for single-pass stereo CPU work — eye midpoint, left-eye orientation
-    // (both eyes share it on Quest), and a frustum that is the UNION of both eyes' so nothing
-    // visible to either eye is rejected.
+    // QuestShip: center view for single-pass stereo CPU work (clip rejection, culling, fog): left-eye
+    // orientation (both eyes share it on Quest), the widest of both eyes' angles, and the apex
+    // pulled BACK from the eye midpoint far enough that this frustum contains both eyes' frusta.
+    // (With the apex at the midpoint, each eye sits half an IPD outside it, so geometry close to
+    // the face at the outer edges, like held items, was rejected while one eye could see it.)
     {
         XrPosef cp = xr.views[0].pose;
-        cp.position = { 0.5f * (xr.views[0].pose.position.x + xr.views[1].pose.position.x),
-                        0.5f * (xr.views[0].pose.position.y + xr.views[1].pose.position.y),
-                        0.5f * (xr.views[0].pose.position.z + xr.views[1].pose.position.z) };
+        const XrVector3f& p0 = xr.views[0].pose.position;
+        const XrVector3f& p1 = xr.views[1].pose.position;
         XrFovf uf;
         uf.angleLeft = fminf(xr.views[0].fov.angleLeft, xr.views[1].fov.angleLeft);
         uf.angleRight = fmaxf(xr.views[0].fov.angleRight, xr.views[1].fov.angleRight);
         uf.angleUp = fmaxf(xr.views[0].fov.angleUp, xr.views[1].fov.angleUp);
         uf.angleDown = fminf(xr.views[0].fov.angleDown, xr.views[1].fov.angleDown);
+        const float dx = p1.x - p0.x, dy = p1.y - p0.y, dz = p1.z - p0.z;
+        const float halfIpd = 0.5f * sqrtf(dx * dx + dy * dy + dz * dz);
+        const float minTan = fmaxf(fminf(tanf(-uf.angleLeft), tanf(uf.angleRight)), 0.1f);
+        const float back = halfIpd / minTan; // meters along the view's +Z (behind the eyes)
+        const XrQuaternionf& q = cp.orientation;
+        // +Z axis of the orientation: q * (0, 0, 1)
+        const float bx = 2.0f * (q.x * q.z + q.w * q.y);
+        const float by = 2.0f * (q.y * q.z - q.w * q.x);
+        const float bz = 1.0f - 2.0f * (q.x * q.x + q.y * q.y);
+        cp.position = { 0.5f * (p0.x + p1.x) + bx * back, 0.5f * (p0.y + p1.y) + by * back,
+                        0.5f * (p0.z + p1.z) + bz * back };
         build_projection_matrix(uf, xr.near_clip, xr.far_clip, xr.projection[2]);
         pose_to_view_matrix(cp, xr.world_scale, xr.view[2]);
     }
@@ -2793,8 +2831,7 @@ bool vr_get_hand_matrix(int hand, float out[4][4]) {
     // along model +X (the sword blade extends along hand-space +X, see the melee weapon tip/base in
     // z_player_lib.c), so the left<->right symmetry plane must KEEP X and flip the thumb axis —
     // default Z. Reflecting X itself (old default) turns the mesh inside-out instead of opposite-handed.
-    int axis = CVarGetInteger("gVrHandMirrorAxis", 2);
-    if (axis < 0 || axis > 2) axis = 2;
+    const int axis = g_hc.mirrorAxis;
     const bool mirrored = g_hand_mirror[hand];
     // Calibration (model rest pose -> controller grip frame). Defaults were hand-tuned in-headset
     // against the MIRRORED sword hand on the right controller, which uses the mirror-conjugate of
@@ -2802,18 +2839,14 @@ bool vr_get_hand_matrix(int hand, float out[4][4]) {
     // two are negated). An UNMIRRORED hand also uses the conjugate regardless of controller: OpenXR
     // grip frames are defined per-hand (palm-relative), so mirror-symmetric physical poses report
     // the same orientation — an unreflected mesh attaches with the same rotation on either side.
-    glm::vec3 calDeg(CVarGetFloat("gVrHandCalPitch", 88.0f), CVarGetFloat("gVrHandCalYaw", -100.0f),
-                     CVarGetFloat("gVrHandCalRoll", 80.0f));
+    glm::vec3 calDeg = g_hc.calDeg;
     // Positional offset (game units) in the controller grip frame, so the hand mesh can be nudged
     // to sit naturally on the controller; the conjugate reflects it (negate the mirror-axis component).
-    glm::vec3 off(CVarGetFloat("gVrHandOffX", 0.0f), CVarGetFloat("gVrHandOffY", 0.0f),
-                  CVarGetFloat("gVrHandOffZ", 0.0f));
-    if (hand == 0 && CVarGetInteger("gVrHandLOverride", 1)) {
+    glm::vec3 off = g_hc.off;
+    if (hand == 0 && g_hc.leftOverride) {
         // Fully independent left-controller tuning (values used literally, no conjugation).
-        calDeg = glm::vec3(CVarGetFloat("gVrHandLCalPitch", -149.0f), CVarGetFloat("gVrHandLCalYaw", 76.0f),
-                           CVarGetFloat("gVrHandLCalRoll", 30.0f));
-        off = glm::vec3(CVarGetFloat("gVrHandLOffX", 0.0f), CVarGetFloat("gVrHandLOffY", 0.0f),
-                        CVarGetFloat("gVrHandLOffZ", 0.0f));
+        calDeg = g_hc.leftCalDeg;
+        off = g_hc.leftOff;
     } else if (hand == 1 || !mirrored) {
         for (int k = 0; k < 3; k++) {
             if (k != axis) calDeg[k] = -calDeg[k];
@@ -2827,14 +2860,11 @@ bool vr_get_hand_matrix(int hand, float out[4][4]) {
     if (mirrored) {
         sc[axis] = -sc[axis];
     }
-    // QuestShip: the hand model's origin is the wrist joint; shift the whole hand frame so the PALM
-    // (model units, default = the fist/blade line the sword code uses, D_80126080.y) sits on the
-    // controller grip point. Held items share this frame, so they stay in the fist and physical
-    // weapon collision stays consistent with what is drawn.
-    const glm::vec3 palm(CVarGetFloat("gVrHandPalmX", 0.0f), CVarGetFloat("gVrHandPalmY", 400.0f),
-                         CVarGetFloat("gVrHandPalmZ", 0.0f));
+    // The hand model's origin is the wrist joint and it sits on the controller grip point, so the
+    // sword pivots at the wrist. Grabbed items (the Deku Nut) offset themselves to the palm
+    // (gVrHandPalm*, model units) in their own draw code.
     glm::mat4 m = glm::translate(glm::mat4(1.0f), world_pos + q * off) * glm::mat4_cast(q * cal) *
-                  glm::scale(glm::mat4(1.0f), sc) * glm::translate(glm::mat4(1.0f), -palm);
+                  glm::scale(glm::mat4(1.0f), sc);
     for (int r = 0; r < 4; r++)
         for (int c = 0; c < 4; c++)
             out[r][c] = m[r][c];
@@ -2987,10 +3017,8 @@ static bool vr_lookup_space_matrix(const void* mtx, float out[4][4]) {
         return false;
     }
     const SpaceMtx& e = it->second;
-    static const auto t0 = std::chrono::steady_clock::now();
-    const float t = std::chrono::duration<float>(std::chrono::steady_clock::now() - t0).count();
     const float kDeg = 3.14159265358979323846f / 180.0f;
-    const float spin = fmodf(e.spin_dps * t, 360.0f) * kDeg;
+    const float spin = (float)fmod((double)e.spin_dps * g_hc.timeS, 360.0) * kDeg; // double: no drift after hours
     const glm::mat4 m = glm::translate(glm::mat4(1.0f), vr_physical_to_world_v(e.anchor_m)) *
                         glm::mat4_cast(g_turn_rot) * glm::translate(glm::mat4(1.0f), e.offset) *
                         glm::rotate(glm::mat4(1.0f), spin, glm::vec3(0.0f, 1.0f, 0.0f)) * e.model;
@@ -3012,10 +3040,9 @@ bool vr_lookup_hand_matrix(const void* mtx, float out[4][4]) {
             }
             // QuestShip: shrink the hand MESH only (not held items, which use the plain hand
             // matrix), scaling around the palm so the palm stays on the grip point.
-            const float k = CVarGetFloat("gVrHandMeshScale", 0.75f);
+            const float k = g_hc.meshScale;
             if (k != 1.0f && g_hand_mesh_scaled[it->second]) {
-                const glm::vec3 palm(CVarGetFloat("gVrHandPalmX", 0.0f), CVarGetFloat("gVrHandPalmY", 400.0f),
-                                     CVarGetFloat("gVrHandPalmZ", 0.0f));
+                const glm::vec3& palm = g_hc.palm;
                 glm::mat4 h;
                 for (int r = 0; r < 4; r++)
                     for (int c = 0; c < 4; c++)
@@ -3345,7 +3372,6 @@ bool vr_menu_pointer(float* x, float* y, bool* down, float* wheel) {
     *down = false;
     return false;
 }
-bool vr_take_start_tap() { return false; }
 bool vr_menu_consumes_button(int, uint16_t) { return false; }
 void vr_begin_menu() {}
 void vr_end_menu() {}

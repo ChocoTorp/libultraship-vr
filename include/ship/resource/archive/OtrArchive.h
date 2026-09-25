@@ -85,6 +85,9 @@ class OtrArchive final : virtual public Archive {
     std::condition_variable mPoolCv;
     std::vector<HANDLE> mFreeHandles;
     std::vector<HANDLE> mAllHandles;
+    size_t mOpening = 0;      // extra handles being opened outside the lock
+    bool mOpenFailed = false; // an extra open failed once: stop trying
+    bool mClosing = false;
 };
 } // namespace Ship
 

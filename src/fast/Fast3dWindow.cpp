@@ -328,7 +328,22 @@ bool Fast3dWindow::DrawAndRunGraphicsCommands(Gfx* commands, const std::unordere
             // X button closes the panel too.
             {
                 static bool sLastMenuVisible = false;
+                static bool sMenuSynced = false;
                 bool visible = gui->GetMenuOrMenubarVisible();
+                if (!sMenuSynced) {
+                    // First VR frame: a menu saved as open on the desktop must not greet the
+                    // player in the headset. Start both closed.
+                    sMenuSynced = true;
+                    if (visible) {
+                        if (gui->GetMenu()) {
+                            gui->GetMenu()->ToggleVisibility();
+                        } else if (gui->GetMenuBar()) {
+                            gui->GetMenuBar()->ToggleVisibility();
+                        }
+                        visible = gui->GetMenuOrMenubarVisible();
+                    }
+                    sLastMenuVisible = visible;
+                }
                 if (visible != sLastMenuVisible) {
                     vr_menu_set_open(visible);
                 } else if (vr_menu_is_open() != visible) {

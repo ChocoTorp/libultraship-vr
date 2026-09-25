@@ -68,6 +68,14 @@ void ResourceManager::Init(const std::vector<std::string>& archivePaths,
 
 ResourceManager::~ResourceManager() {
     SPDLOG_INFO("destruct ResourceManager");
+    // QuestShip: cancel queued preload batches and let in-flight ones finish BEFORE members (and
+    // the Context's pointer to us) go away; the pool's own destructor would otherwise run every
+    // queued low-priority task against a half-destroyed resource system.
+    mPreloadGeneration++;
+    if (mThreadPool != nullptr) {
+        mThreadPool->purge();
+        mThreadPool->wait();
+    }
 }
 
 bool ResourceManager::IsLoaded() {
@@ -172,6 +180,13 @@ std::shared_ptr<IResource> ResourceManager::LoadResourceProcess(const ResourceId
             // If another thread has already loaded this resource, discard the work we already did and return from
             // cache.
             resource = cachedResource;
+        }
+        // QuestShip: re-check under the lock: the texture preloader and the render thread can both
+        // miss on the same path; keep whichever copy was cached first so one path is one resource.
+        auto existing = mResourceCache.find(identifier);
+        if (existing != mResourceCache.end() && std::holds_alternative<std::shared_ptr<IResource>>(existing->second) &&
+            std::get<std::shared_ptr<IResource>>(existing->second) != nullptr) {
+            resource = std::get<std::shared_ptr<IResource>>(existing->second);
         }
 
         // Set the cache to the loaded resource
@@ -412,9 +427,12 @@ size_t ResourceManager::UnloadResource(const ResourceIdentifier& identifier) {
     // We can only erase the resource if we have any resources for that owner.
     {
         const std::lock_guard<std::mutex> lock(mMutex); // QuestShip: check under the lock too
-        if (mResourceCache.contains(identifier)) {
-            mResourceCache.erase(identifier);
+        auto it = mResourceCache.find(identifier);
+        if (it != mResourceCache.end()) {
+            value = std::move(it->second); // destructed after the lock is released (see above)
+            mResourceCache.erase(it);
             mCacheGeneration++;
+            ret = 1;
         }
     }
 
@@ -439,7 +457,15 @@ void ResourceManager::PreloadAltTexturesAsync(const std::string& searchMask) {
                 }
                 // Textures and palettes only: their factory never nests resource loads (other
                 // factories do, and a pool worker blocking on the pool can deadlock).
-                if (path.find("Tex") == std::string::npos && path.find("TLUT") == std::string::npos) {
+                // Judged on the leaf name; names like "...TexAnim" or "...TexDL" are not textures.
+                const std::string_view leaf = std::string_view(path).substr(path.find_last_of('/') + 1);
+                const bool texName = leaf.find("Tex") != std::string_view::npos || leaf.find("TLUT") != std::string_view::npos;
+                const bool otherKind = leaf.find("DL") != std::string_view::npos ||
+                                       leaf.find("Skel") != std::string_view::npos ||
+                                       leaf.find("Anim") != std::string_view::npos ||
+                                       leaf.find("Col") != std::string_view::npos ||
+                                       leaf.find("Vtx") != std::string_view::npos;
+                if (!texName || otherKind) {
                     continue;
                 }
                 if (!GetArchiveManager()->HasFile(IResource::gAltAssetPrefix + path)) {

@@ -344,6 +344,8 @@ void Gui::StartFrame() {
             mImGuiIo->AddMouseWheelEvent(0.0f, wheel);
         }
         mImGuiIo->MouseDrawCursor = true;
+    } else {
+        mImGuiIo->MouseDrawCursor = false; // the desktop window has a real cursor
     }
 #endif
     ImGui::NewFrame();

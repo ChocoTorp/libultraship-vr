@@ -128,6 +128,10 @@ uint16_t VR_GetControllerButton(int hand) {
     return vr_get_controller_buttons(hand);
 }
 
+uint16_t VR_GetGameButtons(int hand) {
+    return vr_menu_is_open() ? 0 : vr_get_controller_buttons(hand);
+}
+
 void VR_GetThumbstick(int hand, float* x, float* y) {
     vr_get_thumbstick(hand, x, y);
 }
@@ -376,10 +380,6 @@ bool VR_MenuIsOpen(void) {
 
 bool VR_MenuConsumesButton(int hand, uint16_t mask) {
     return vr_menu_consumes_button(hand, mask);
-}
-
-bool VR_TakeStartTap(void) {
-    return vr_take_start_tap();
 }
 
 void VR_RegisterSpaceMatrix(const void* mtx, const float anchorM[3], const float offsetUnits[3],

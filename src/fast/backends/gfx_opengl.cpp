@@ -37,9 +37,10 @@ static constexpr size_t kVboRingBytes = 64u * 1024u * 1024u; // QuestShip: persi
 
 namespace Fast {
 int GfxRenderingAPIOGL::GetMaxTextureSize() {
-    GLint max_texture_size;
-    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_texture_size);
-    return max_texture_size;
+    if (mMaxTextureSize == 0) { // QuestShip: constant for the context; was a glGet per texture import
+        glGetIntegerv(GL_MAX_TEXTURE_SIZE, &mMaxTextureSize);
+    }
+    return mMaxTextureSize;
 }
 
 const char* GfxRenderingAPIOGL::GetName() {
@@ -64,27 +65,47 @@ static void VertexArraySetAttribs(ShaderProgram* prg) {
     }
 }
 
+// QuestShip: every uniform below is cached per program and only re-sent when it changed; with
+// thousands of draws per frame the redundant glUniform* calls were measurable driver CPU time.
 void GfxRenderingAPIOGL::SetUniforms(ShaderProgram* prg) const {
-    glUniform1i(prg->frameCountLocation, mFrameCount);
-    glUniform1f(prg->noiseScaleLocation, mCurrentNoiseScale);
+    if (prg->sentFrameCount != mFrameCount) {
+        glUniform1i(prg->frameCountLocation, mFrameCount);
+        prg->sentFrameCount = mFrameCount;
+    }
+    if (prg->sentNoiseScale != mCurrentNoiseScale) {
+        glUniform1f(prg->noiseScaleLocation, mCurrentNoiseScale);
+        prg->sentNoiseScale = mCurrentNoiseScale;
+    }
 }
 
 void GfxRenderingAPIOGL::SetPerDrawUniforms() {
-    glUniform1f(mCurrentShaderProgram->prim_depth_location, mCurrentPrimDepth);
-    if (mCurrentShaderProgram->multiview) {
-        glUniformMatrix4fv(mCurrentShaderProgram->vrViewProjLocation, 2, GL_FALSE, mStereoViewProj);
-        glUniform1i(mCurrentShaderProgram->vrWorldLocation, mStereoWorld ? 1 : 0);
+    ShaderProgram* prg = mCurrentShaderProgram;
+    if (prg->sentPrimDepth != mCurrentPrimDepth) {
+        glUniform1f(prg->prim_depth_location, mCurrentPrimDepth);
+        prg->sentPrimDepth = mCurrentPrimDepth;
+    }
+    if (prg->multiview) {
+        if (prg->sentViewProjGen != mStereoViewProjGen) {
+            glUniformMatrix4fv(prg->vrViewProjLocation, 2, GL_FALSE, mStereoViewProj);
+            prg->sentViewProjGen = mStereoViewProjGen;
+        }
+        const int8_t world = mStereoWorld ? 1 : 0;
+        if (prg->sentWorld != world) {
+            glUniform1i(prg->vrWorldLocation, world);
+            prg->sentWorld = world;
+        }
     }
 
-    if (mCurrentShaderProgram->usedTextures[0] || mCurrentShaderProgram->usedTextures[1]) {
-        GLint filtering[2] = { textures[mCurrentTextureIds[0]].filtering, textures[mCurrentTextureIds[1]].filtering };
-        glUniform1iv(mCurrentShaderProgram->texture_filtering_location, 2, filtering);
-
-        GLint width[2] = { textures[mCurrentTextureIds[0]].width, textures[mCurrentTextureIds[1]].width };
-        glUniform1iv(mCurrentShaderProgram->texture_width_location, 2, width);
-
-        GLint height[2] = { textures[mCurrentTextureIds[0]].height, textures[mCurrentTextureIds[1]].height };
-        glUniform1iv(mCurrentShaderProgram->texture_height_location, 2, height);
+    if (prg->usedTextures[0] || prg->usedTextures[1]) {
+        const TextureInfo& t0 = textures[mCurrentTextureIds[0]];
+        const TextureInfo& t1 = textures[mCurrentTextureIds[1]];
+        const GLint v[6] = { t0.filtering, t1.filtering, t0.width, t1.width, t0.height, t1.height };
+        if (memcmp(v, prg->sentTex, sizeof(v)) != 0) {
+            glUniform1iv(prg->texture_filtering_location, 2, &v[0]);
+            glUniform1iv(prg->texture_width_location, 2, &v[2]);
+            glUniform1iv(prg->texture_height_location, 2, &v[4]);
+            memcpy(prg->sentTex, v, sizeof(v));
+        }
     }
 }
 
@@ -438,6 +459,21 @@ static std::string BuildVsShader(const CCFeatures& cc_features, bool multiview) 
 }
 
 void GfxRenderingAPIOGL::ClearShaderCache() {
+    // QuestShip: drop every pointer into the pools too (they would dangle), and the multiview
+    // twins, whose GL programs would otherwise leak when rebuilt.
+    if (mLastLoadedShader != nullptr) {
+        UnloadShader(mLastLoadedShader);
+    }
+    mRequestedShader = nullptr;
+    mCurrentShaderProgram = nullptr;
+    mLastLoadedShader = nullptr;
+    for (auto& [key, prg] : mMvShaderProgramPool) {
+        glDeleteProgram(prg.openglProgramId);
+    }
+    mMvShaderProgramPool.clear();
+    for (auto& [key, prg] : mShaderProgramPool) {
+        glDeleteProgram(prg.openglProgramId);
+    }
     mShaderProgramPool.clear();
 }
 
@@ -616,7 +652,7 @@ GLuint GfxRenderingAPIOGL::NewTexture() {
     GLuint ret;
     glGenTextures(1, &ret);
     textures.resize(std::max(textures.size(), (size_t)ret + 1));
-    textures[ret].mipmapped = false; // a recycled id must not inherit the old texture's mips
+    textures[ret] = TextureInfo{}; // a reused GL name must not inherit the old texture's state
     return ret;
 }
 
@@ -641,18 +677,33 @@ void GfxRenderingAPIOGL::UploadTexture(const uint8_t* rgba32_buf, uint32_t width
     if (width == 0 || height == 0) {
         return;
     }
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 1000); // QuestShip: undo a previous ASTC chain's cap
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba32_buf);
-    textures[mCurrentTextureIds[mCurrentTile]].width = width;
-    textures[mCurrentTextureIds[mCurrentTile]].height = height;
+    TextureInfo& info = textures[mCurrentTextureIds[mCurrentTile]];
+    info.width = width;
+    info.height = height;
     // QuestShip: mipmaps. Without them, distant textures (HD packs especially) shimmer and crawl
-    // as the head moves. Built once per upload on the GPU; sampling picks them up in
-    // SetSamplerParameters. Framebuffer textures never pass through here, so they stay unmipped.
-    const bool mips = CVarGetInteger("gTextureMipmaps", 1) != 0 && width > 1 && height > 1;
+    // as the head moves. Built once per upload on the GPU. Tiny textures (mostly the N64's own
+    // small tiles, often re-uploaded) gain nothing from a chain, so they skip it.
+    const bool mips = CVarGetInteger("gTextureMipmaps", 1) != 0 && width >= 8 && height >= 8;
     if (mips) {
         glGenerateMipmap(GL_TEXTURE_2D);
     }
-    textures[mCurrentTextureIds[mCurrentTile]].mipmapped = mips;
+    FinishTextureUpload(info, mips);
+}
+
+// QuestShip: the sampler state is set BEFORE the upload (Interpreter::TextureCacheLookup), when
+// the mip flag still described whatever this texture object held before. Make MIN_FILTER and
+// MAX_LEVEL agree with the new contents: a mipmap MIN_FILTER on a texture without valid levels
+// makes it incomplete, which samples black.
+void GfxRenderingAPIOGL::FinishTextureUpload(TextureInfo& info, bool mipmapped) {
+    info.mipmapped = mipmapped;
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, mipmapped ? 1000 : 0);
+    const GLint mag = info.magFilter != 0 ? info.magFilter : GL_NEAREST;
+    const GLint minFilter = !mipmapped ? mag : (mag == GL_LINEAR ? GL_LINEAR_MIPMAP_LINEAR : GL_NEAREST_MIPMAP_LINEAR);
+    if (info.minFilter != minFilter) {
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, minFilter);
+        info.minFilter = minFilter;
+    }
 }
 
 #ifdef USE_OPENGLES
@@ -693,11 +744,13 @@ bool GfxRenderingAPIOGL::UploadCompressedTexture(uint32_t blockX, uint32_t block
     for (uint32_t l = 0; l < levelCount; l++) {
         glCompressedTexImage2D(GL_TEXTURE_2D, l, fmt, widths[l], heights[l], 0, sizes[l], data[l]);
     }
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, (GLint)levelCount - 1);
     TextureInfo& info = textures[mCurrentTextureIds[mCurrentTile]];
     info.width = widths[0];
     info.height = heights[0];
-    info.mipmapped = levelCount > 1;
+    FinishTextureUpload(info, levelCount > 1);
+    if (levelCount > 1) {
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, (GLint)levelCount - 1);
+    }
     return true;
 }
 
@@ -710,18 +763,36 @@ void GfxRenderingAPIOGL::SetSamplerParameters(int tile, bool linear_filter, uint
     // QuestShip: mipmapped textures minify through their mip chain (trilinear for Linear; for
     // point/Three-Point, nearest texel within linearly blended levels, so the N64-style shader
     // filter is unchanged up close). Anisotropy keeps floors sharp at grazing angles.
-    const bool mipped = mCurrentTextureIds[tile] < textures.size() && textures[mCurrentTextureIds[tile]].mipmapped;
+    if (mCurrentTextureIds[tile] >= textures.size()) {
+        textures.resize(mCurrentTextureIds[tile] + 1);
+    }
+    TextureInfo& info = textures[mCurrentTextureIds[tile]];
+    const bool mipped = info.mipmapped;
     const GLint minFilter =
         !mipped ? filter : (filter == GL_LINEAR ? GL_LINEAR_MIPMAP_LINEAR : GL_NEAREST_MIPMAP_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, minFilter);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
-    if (mipped && mMaxAnisotropy > 1.0f) {
-        const float aniso = std::min((float)CVarGetInteger("gTextureAnisotropy", 4), mMaxAnisotropy);
-        glTexParameterf(GL_TEXTURE_2D, 0x84FE /* GL_TEXTURE_MAX_ANISOTROPY_EXT */, std::max(aniso, 1.0f));
+    // QuestShip: only touch what changed (texture parameters live in the texture object).
+    if (info.minFilter != minFilter) {
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, minFilter);
+        info.minFilter = minFilter;
     }
-    textures[mCurrentTextureIds[tile]].filtering = !linear_filter ? FILTER_LINEAR : FILTER_THREE_POINT;
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, gfx_cm_to_opengl(cms));
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, gfx_cm_to_opengl(cmt));
+    if (info.magFilter != filter) {
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
+        info.magFilter = filter;
+    }
+    if (mipped && mMaxAnisotropy > 1.0f && info.aniso != mAnisotropy) {
+        glTexParameterf(GL_TEXTURE_2D, 0x84FE /* GL_TEXTURE_MAX_ANISOTROPY_EXT */, mAnisotropy);
+        info.aniso = mAnisotropy;
+    }
+    info.filtering = !linear_filter ? FILTER_LINEAR : FILTER_THREE_POINT;
+    const GLint wrapS = gfx_cm_to_opengl(cms), wrapT = gfx_cm_to_opengl(cmt);
+    if (info.wrapS != wrapS) {
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrapS);
+        info.wrapS = wrapS;
+    }
+    if (info.wrapT != wrapT) {
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrapT);
+        info.wrapT = wrapT;
+    }
 }
 
 void GfxRenderingAPIOGL::SetDepthTestAndMask(bool depth_test, bool z_upd) {
@@ -832,6 +903,12 @@ void GfxRenderingAPIOGL::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, size
             memcpy(mVboMapped + off, buf_vbo, bytes);
             glDrawArrays(GL_TRIANGLES, (GLint)(off / stride), (GLsizei)verts);
             mVboCursor = off + bytes;
+        } else if (stride > 0) {
+            static bool sWarned = false;
+            if (!sWarned) {
+                sWarned = true;
+                SPDLOG_WARN("VBO ring: skipped a {} byte draw (limit {})", bytes, kVboRingBytes / 4);
+            }
         }
         return; // the immutable buffer can't take glBufferData; oversized draws are skipped
     }
@@ -904,6 +981,9 @@ void GfxRenderingAPIOGL::OnResize() {
 
 void GfxRenderingAPIOGL::StartFrame() {
     mFrameCount++;
+    if (mMaxAnisotropy > 1.0f) {
+        mAnisotropy = std::max(1.0f, std::min((float)CVarGetInteger("gTextureAnisotropy", 4), mMaxAnisotropy));
+    }
 }
 
 void GfxRenderingAPIOGL::EndFrame() {
@@ -922,11 +1002,20 @@ void GfxRenderingAPIOGL::VboWaitFor(size_t off, size_t bytes) {
         if (s <= e) {
             return a0 < e && s < a1;
         }
-        return a0 < e || s < a1 || (a0 < kVboRingBytes && s < kVboRingBytes && a1 > s); // wrapped
+        return a0 < e || s < a1; // wrapped: [s, end of ring) + [0, e)
     };
     while (!mVboFences.empty() && (overlaps(mVboFences.front().start, mVboFences.front().end) ||
                                    mVboFences.size() > 8)) {
-        glClientWaitSync(mVboFences.front().fence, GL_SYNC_FLUSH_COMMANDS_BIT, 100000000ull); // 100 ms cap
+        // The GPU must be done with that range before we overwrite it; never give up on a fence
+        // (a timeout here would mean scribbling over vertices still being drawn).
+        GLenum r;
+        int waits = 0;
+        do {
+            r = glClientWaitSync(mVboFences.front().fence, GL_SYNC_FLUSH_COMMANDS_BIT, 100000000ull); // 100 ms
+            if (r == GL_TIMEOUT_EXPIRED && ++waits == 10) {
+                SPDLOG_WARN("VBO ring: GPU fence still pending after 1 s");
+            }
+        } while (r == GL_TIMEOUT_EXPIRED);
         glDeleteSync(mVboFences.front().fence);
         mVboFences.pop_front();
     }
@@ -938,10 +1027,14 @@ void GfxRenderingAPIOGL::FinishRender() {
 int GfxRenderingAPIOGL::CreateFramebuffer() {
     GLuint clrbuf;
     glGenTextures(1, &clrbuf);
+    // QuestShip: the GL name may be one a deleted (mipmapped) texture used; reset its cached state.
+    textures.resize(std::max(textures.size(), (size_t)clrbuf + 1));
+    textures[clrbuf] = TextureInfo{};
     glBindTexture(GL_TEXTURE_2D, clrbuf);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, 1, 1, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    textures[clrbuf].minFilter = textures[clrbuf].magFilter = GL_LINEAR;
     glBindTexture(GL_TEXTURE_2D, 0);
 
     GLuint clrbufMsaa;
@@ -1058,7 +1151,10 @@ void GfxRenderingAPIOGL::SetMultiviewTarget(bool multiview) {
 }
 
 void GfxRenderingAPIOGL::SetStereoViewProj(const float* vp32) {
-    memcpy(mStereoViewProj, vp32, sizeof(mStereoViewProj));
+    if (memcmp(mStereoViewProj, vp32, sizeof(mStereoViewProj)) != 0) {
+        memcpy(mStereoViewProj, vp32, sizeof(mStereoViewProj));
+        mStereoViewProjGen++;
+    }
 }
 
 void GfxRenderingAPIOGL::SetStereoWorldSpace(bool worldSpace) {
