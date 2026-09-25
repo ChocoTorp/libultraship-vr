@@ -1609,13 +1609,32 @@ void vr_menu_set_open(bool open) {
     xr.ptr_wheel = 0.0f;
 }
 
+// QuestShip: which controller button opens the settings menu (gVrMenuButton):
+// 0 left menu, 1 left stick click, 2 right stick click, 3 X, 4 Y, 5 A, 6 B.
+static void vr_menu_button(int& hand, uint16_t& mask) {
+    static const struct {
+        int hand;
+        uint16_t mask;
+    } kButtons[] = { { 0, 1 << 5 }, { 0, 1 << 4 }, { 1, 1 << 4 }, { 0, 1 << 2 },
+                     { 0, 1 << 3 }, { 1, 1 << 2 }, { 1, 1 << 3 } };
+    int i = CVarGetInteger("gVrMenuButton", 0);
+    if (i < 0 || i >= (int)(sizeof(kButtons) / sizeof(kButtons[0]))) {
+        i = 0;
+    }
+    hand = kButtons[i].hand;
+    mask = kButtons[i].mask;
+}
+
 static void vr_menu_update() {
     if (!xr.input_initialized) {
         return;
     }
-    // Left menu button (hamburger) toggles the settings menu on every press. It never reaches
-    // the game; pause lives on its own input (see padmgr).
-    const bool btn = (xr.buttons[0] & (1 << 5)) != 0; // VR_BTN_MENU, left controller
+    // The settings-menu button (left menu by default, gVrMenuButton) toggles the menu on every
+    // press. It never reaches the game while it is the menu button.
+    int menuHand;
+    uint16_t menuMask;
+    vr_menu_button(menuHand, menuMask);
+    const bool btn = (xr.buttons[menuHand] & menuMask) != 0;
     if (btn && !xr.menu_btn_prev) {
         vr_menu_set_open(!xr.menu_open);
         vr_trigger_haptic(0, 0.5f, 0.0f, 40.0f);
@@ -1698,7 +1717,10 @@ bool vr_menu_consumes_button(int hand, uint16_t mask) {
     if (xr.menu_open) {
         return true; // the menu owns every controller input while it is up
     }
-    return hand == 0 && (mask & (1 << 5)) != 0; // left menu button belongs to the settings menu
+    int menuHand;
+    uint16_t menuMask;
+    vr_menu_button(menuHand, menuMask);
+    return hand == menuHand && (mask & menuMask) != 0; // the settings-menu button never reaches the game
 }
 
 void vr_begin_menu() {
